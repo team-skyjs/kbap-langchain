@@ -1,11 +1,11 @@
 kbap_api:
-  base_url: http://localhost:8080   # 홈서버 배포 시 실제 kbap 주소로 교체. 인증: KBAP_API_TOKEN 환경변수
+  base_url: https://dev.kbap.site/api # 홈서버 배포 시 실제 kbap 주소로 교체. 인증: KBAP_API_TOKEN 환경변수
 llm:
-  model: gemini-2.5-flash           # 기본 채점 모델. 언제든 교체 가능
+  model: gemini-2.5-flash # 기본 채점 모델. 언제든 교체 가능
   avoidance_model: gemini-2.5-flash # 안전 직결 노드만 별도 오버라이드 (판정 이상 시 gpt-5-mini 등)
-  timeout_seconds: 120               # LLM 콜 타임아웃. 모델이 느려지면 이 값을 조정
-thresholds:                         # 필드군별 통과 임계값 — 운영하며 튜닝
+  timeout_seconds: 120 # LLM 콜 타임아웃. 모델이 느려지면 이 값을 조정
+thresholds: # 필드군별 통과 임계값 — 운영하며 튜닝
   description: 70
-  translations: 70
-  avoidance: 70
+  translations: 60
+  avoidance: 75
 concurrency: 5

@@ -1,6 +1,7 @@
 import os
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
 
@@ -21,6 +22,9 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
+    # .env 를 상위 디렉터리까지 훑어 읽는다(노트북은 notebooks/ 에서 실행돼도 루트 .env 를 찾는다).
+    # override=False 라 이미 설정된 환경변수가 우선 — cron/CI 가 준 값을 .env 가 덮지 않는다.
+    load_dotenv()
     with open(path) as f:
         raw = yaml.safe_load(f)
     llm = raw["llm"]
