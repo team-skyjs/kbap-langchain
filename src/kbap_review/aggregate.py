@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from kbap_review.config import Thresholds
 from kbap_review.scoring import FieldScore
 
-MAX_NOTE_LINES = 10
+MAX_NOTE_CHARS = 1000
 
 # 재검수(컬럼 비움 + INCOMPLETE 롤백) 허용 횟수 — 스펙: 2회까지, 이후 REJECT.
 MAX_RETRY_ATTEMPTS = 2
@@ -47,16 +47,17 @@ def decide(
     if review_attempts < MAX_RETRY_ATTEMPTS:
         return Verdict(verdict="RETRY", failed_fields=failed, scores=scores)
 
+    # 단일 줄 그룹(설명·기피성분)을 먼저 넣어 언어 줄이 많아도 잘려나가지 않게 한다.
     note_lines: list[str] = []
     if "description" in failed:
         note_lines.append(f"- 설명({description_score.score}점): {description_score.reason}")
-    for lang, s in failed_langs.items():
-        note_lines.append(f"- 번역 {lang}({s.score}점): {s.reason}")
     if "avoidance" in failed:
         note_lines.append(f"- 기피성분·매운맛({avoidance_score.score}점): {avoidance_score.reason}")
+    for lang, s in failed_langs.items():
+        note_lines.append(f"- 번역 {lang}({s.score}점): {s.reason}")
     return Verdict(
         verdict="REJECT",
         failed_fields=failed,
         scores=scores,
-        review_note="\n".join(note_lines[:MAX_NOTE_LINES]),
+        review_note="\n".join(note_lines)[:MAX_NOTE_CHARS],
     )

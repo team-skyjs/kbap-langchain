@@ -1,4 +1,4 @@
-from kbap_review.aggregate import MAX_NOTE_LINES, decide
+from kbap_review.aggregate import MAX_NOTE_CHARS, decide
 from kbap_review.config import Thresholds
 from kbap_review.scoring import FieldScore
 
@@ -51,13 +51,27 @@ def test_reject_at_two_attempts():
     assert "돼지고기 누락" in v.review_note
 
 
-def test_reject_note_capped_at_10_lines():
-    translations = {f"l{i}": fs(10, f"사유 {i}") for i in range(15)}
+def test_reject_note_capped_at_1000_chars():
+    translations = {f"l{i}": fs(10, "사" * 200) for i in range(15)}
     v = decide(2, fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
-    assert len(v.review_note.splitlines()) <= MAX_NOTE_LINES
+    assert len(v.review_note) <= MAX_NOTE_CHARS
+
+
+def test_reject_note_keeps_description_and_avoidance_when_many_langs_fail():
+    # 단일 줄 그룹(설명·기피성분)은 언어 줄보다 먼저 들어가 잘리지 않는다.
+    translations = {f"l{i}": fs(10, "사" * 200) for i in range(15)}
+    v = decide(2, fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
+    assert "설명 문제" in v.review_note
+    assert "성분 문제" in v.review_note
 
 
 def test_pass_at_two_attempts_still_passes():
     # attempts가 몇이든 점수가 되면 PASS
     v = decide(5, fs(90), all_pass_translations(), fs(90), TH)
     assert v.verdict == "PASS"
+
+
+def test_retry_on_avoidance_only_fail():
+    v = decide(0, fs(90), all_pass_translations(), fs(40, "돼지고기 누락"), TH)
+    assert v.verdict == "RETRY"
+    assert v.failed_fields == ["avoidance"]
