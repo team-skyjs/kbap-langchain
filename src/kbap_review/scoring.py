@@ -71,3 +71,42 @@ def avoidance_prompt(food: dict) -> str:
 매운맛 등급: {food["spiciness"]}
 
 score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
+
+
+def make_scorers(config):
+    """실 LLM 기반 스코어러. import를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
+    from langchain.chat_models import init_chat_model
+
+    from kbap_review.graph import Scorers
+
+    def _model(name: str):
+        # "gemini-*"는 자동 추론이 안 되는 버전이 있어 provider를 명시한다.
+        # gpt-* 등 타 벤더로 바꾸면 "openai:gpt-5-mini"처럼 "provider:model" 형식으로 설정.
+        if ":" in name:
+            provider, model = name.split(":", 1)
+            return init_chat_model(model, model_provider=provider)
+        if name.startswith("gemini"):
+            return init_chat_model(name, model_provider="google_genai")
+        return init_chat_model(name)
+
+    base = _model(config.model)
+    avoid = _model(config.avoidance_model)
+    desc_llm = base.with_structured_output(FieldScore)
+    trans_llm = base.with_structured_output(TranslationScores)
+    avoid_llm = avoid.with_structured_output(FieldScore)
+
+    async def description(food: dict) -> FieldScore:
+        return await desc_llm.ainvoke(description_prompt(food))
+
+    async def translations(food: dict) -> dict[str, FieldScore]:
+        result: TranslationScores = await trans_llm.ainvoke(translations_prompt(food))
+        scores = {i.lang: FieldScore(score=i.score, reason=i.reason) for i in result.items}
+        # 모델이 언어를 누락하면 0점 처리 — 누락을 통과로 취급하지 않는다(fail-closed).
+        for lang in TARGET_LANGS:
+            scores.setdefault(lang, FieldScore(score=0, reason="모델 응답에서 언어 누락"))
+        return scores
+
+    async def avoidance(food: dict) -> FieldScore:
+        return await avoid_llm.ainvoke(avoidance_prompt(food))
+
+    return Scorers(description=description, translations=translations, avoidance=avoidance)
