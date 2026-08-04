@@ -73,6 +73,19 @@ def avoidance_prompt(food: dict) -> str:
 score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
 
 
+def lang_scores(result: TranslationScores) -> dict[str, FieldScore]:
+    """모델 응답을 언어별 점수 맵으로 변환하고, 누락된 언어는 0점으로 채운다.
+
+    make_scorers 밖으로 뺀 이유: make_scorers는 API 키 없이 생성할 수 없어 이 백필
+    로직(누락=fail-closed)을 단위 테스트할 방법이 없었다.
+    """
+    scores = {i.lang: FieldScore(score=i.score, reason=i.reason) for i in result.items}
+    # 모델이 언어를 누락하면 0점 처리 — 누락을 통과로 취급하지 않는다(fail-closed).
+    for lang in TARGET_LANGS:
+        scores.setdefault(lang, FieldScore(score=0, reason="모델 응답에서 언어 누락"))
+    return scores
+
+
 def make_scorers(config):
     """실 LLM 기반 스코어러. import를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
     from langchain.chat_models import init_chat_model
@@ -82,12 +95,16 @@ def make_scorers(config):
     def _model(name: str):
         # "gemini-*"는 자동 추론이 안 되는 버전이 있어 provider를 명시한다.
         # gpt-* 등 타 벤더로 바꾸면 "openai:gpt-5-mini"처럼 "provider:model" 형식으로 설정.
+        # timeout 미설정 시 SDK 기본값을 쓰는데, 무인 배치에서 한 콜이 멈추면 그
+        # 세마포어 슬롯을 영원히 붙잡아 gather 전체가 멎는다 — 반드시 설정한다.
         if ":" in name:
             provider, model = name.split(":", 1)
-            return init_chat_model(model, model_provider=provider)
+            return init_chat_model(model, model_provider=provider, timeout=config.timeout_seconds)
         if name.startswith("gemini"):
-            return init_chat_model(name, model_provider="google_genai")
-        return init_chat_model(name)
+            return init_chat_model(
+                name, model_provider="google_genai", timeout=config.timeout_seconds
+            )
+        return init_chat_model(name, timeout=config.timeout_seconds)
 
     base = _model(config.model)
     avoid = _model(config.avoidance_model)
@@ -100,11 +117,7 @@ def make_scorers(config):
 
     async def translations(food: dict) -> dict[str, FieldScore]:
         result: TranslationScores = await trans_llm.ainvoke(translations_prompt(food))
-        scores = {i.lang: FieldScore(score=i.score, reason=i.reason) for i in result.items}
-        # 모델이 언어를 누락하면 0점 처리 — 누락을 통과로 취급하지 않는다(fail-closed).
-        for lang in TARGET_LANGS:
-            scores.setdefault(lang, FieldScore(score=0, reason="모델 응답에서 언어 누락"))
-        return scores
+        return lang_scores(result)
 
     async def avoidance(food: dict) -> FieldScore:
         return await avoid_llm.ainvoke(avoidance_prompt(food))

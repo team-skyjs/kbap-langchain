@@ -36,7 +36,7 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
     def aggregate(state: ReviewState):
         return {
             "verdict": decide(
-                review_attempts=state["food"].get("reviewAttempts", 0),
+                review_attempts=state["food"]["reviewAttempts"],
                 description_score=state["description_score"],
                 translation_scores=state["translation_scores"],
                 avoidance_score=state["avoidance_score"],

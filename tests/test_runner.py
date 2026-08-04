@@ -1,7 +1,7 @@
 from kbap_review.__main__ import run_batch
 from kbap_review.config import Thresholds
 from kbap_review.graph import Scorers, build_graph
-from kbap_review.scoring import FieldScore
+from kbap_review.scoring import TARGET_LANGS, FieldScore
 
 TH = Thresholds(description=70, translations=70, avoidance=70)
 
@@ -14,14 +14,16 @@ class FakeClient:
         self.posts.append(food_id)
 
 
-def scorers_failing_for(bad_id: int) -> Scorers:
+def scorers_failing_for(bad_id: int | None) -> Scorers:
     async def d(food):
         if food["id"] == bad_id:
             raise RuntimeError("LLM down")
+        if food.get("fail_desc"):
+            return FieldScore(score=30, reason="설명 문제")
         return FieldScore(score=90, reason="ok")
 
     async def t(food):
-        return {"en": FieldScore(score=90, reason="ok")}
+        return {lang: FieldScore(score=90, reason="ok") for lang in TARGET_LANGS}
 
     async def a(food):
         return FieldScore(score=90, reason="ok")
@@ -43,3 +45,31 @@ async def test_run_batch_counts_and_isolates_failures():
     # id=2는 LLM 실패 → 보류(HELD), POST 없음. 나머지는 PASS + POST.
     assert counts == {"PASS": 2, "RETRY": 0, "REJECT": 0, "HELD": 1}
     assert sorted(client.posts) == [1, 3]
+
+
+async def test_run_batch_missing_review_attempts_is_held_not_retried():
+    # kbap 응답에 reviewAttempts가 없으면(계약 위반) 무한 RETRY 대신 보류로 떨어져야 한다.
+    client = FakeClient()
+    graph = build_graph(scorers_failing_for(bad_id=None), client, TH)
+    foods = [{"id": 9, "koreanName": "떡볶이"}]  # reviewAttempts 키 없음
+
+    counts = await run_batch(graph, foods, concurrency=2, callbacks=[])
+
+    assert counts == {"PASS": 0, "RETRY": 0, "REJECT": 0, "HELD": 1}
+    assert client.posts == []
+
+
+async def test_run_batch_counts_all_four_outcomes():
+    client = FakeClient()
+    graph = build_graph(scorers_failing_for(bad_id=2), client, TH)
+    foods = [
+        {"id": 1, "koreanName": "김치찌개", "reviewAttempts": 0},
+        {"id": 2, "koreanName": "불고기", "reviewAttempts": 0},
+        {"id": 3, "koreanName": "비빔밥", "reviewAttempts": 0, "fail_desc": True},
+        {"id": 4, "koreanName": "냉면", "reviewAttempts": 2, "fail_desc": True},
+    ]
+
+    counts = await run_batch(graph, foods, concurrency=2, callbacks=[])
+
+    # id=1 PASS, id=2 LLM 실패→HELD, id=3 첫 실패→RETRY, id=4 재시도 소진→REJECT
+    assert counts == {"PASS": 1, "RETRY": 1, "REJECT": 1, "HELD": 1}

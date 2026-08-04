@@ -17,6 +17,7 @@ class AppConfig(BaseModel):
     avoidance_model: str
     thresholds: Thresholds
     concurrency: int
+    timeout_seconds: int = 120
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
@@ -30,4 +31,5 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         avoidance_model=llm.get("avoidance_model", llm["model"]),
         thresholds=Thresholds(**raw["thresholds"]),
         concurrency=raw["concurrency"],
+        timeout_seconds=llm.get("timeout_seconds", 120),
     )

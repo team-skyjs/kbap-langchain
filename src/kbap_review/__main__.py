@@ -12,6 +12,8 @@ log = logging.getLogger("kbap_review")
 
 
 async def run_batch(graph, foods: list[dict], concurrency: int, callbacks: list) -> dict[str, int]:
+    # concurrency는 동시 실행 "그래프" 수를 제한한다 — 그래프 하나가 3개 필드군을
+    # 팬아웃하므로 실제 동시 LLM 콜 상한은 concurrency * 3. Gemini RPM 쿼터는 이 값 기준으로 확인.
     sem = asyncio.Semaphore(concurrency)
 
     async def one(food: dict):

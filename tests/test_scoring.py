@@ -4,9 +4,11 @@ from pydantic import ValidationError
 from kbap_review.scoring import (
     TARGET_LANGS,
     FieldScore,
+    TranslationLangScore,
     TranslationScores,
     avoidance_prompt,
     description_prompt,
+    lang_scores,
     translations_prompt,
 )
 
@@ -56,3 +58,22 @@ def test_avoidance_prompt_contains_substances_and_spiciness():
     assert "PORK" in p
     assert "95" in p
     assert "7" in p
+
+
+def test_lang_scores_backfills_missing_languages_with_zero():
+    result = TranslationScores(items=[TranslationLangScore(lang="en", score=90, reason="ok")])
+
+    scores = lang_scores(result)
+
+    assert set(scores.keys()) == set(TARGET_LANGS)
+    assert scores["en"].score == 90
+    assert scores["ja"].score == 0
+    assert scores["ja"].reason == "모델 응답에서 언어 누락"
+
+
+def test_lang_scores_keeps_all_scores_when_response_is_complete():
+    items = [TranslationLangScore(lang=lang, score=80, reason="ok") for lang in TARGET_LANGS]
+
+    scores = lang_scores(TranslationScores(items=items))
+
+    assert {lang: s.score for lang, s in scores.items()} == {lang: 80 for lang in TARGET_LANGS}

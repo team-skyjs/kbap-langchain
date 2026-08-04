@@ -1,6 +1,6 @@
 from kbap_review.config import Thresholds
 from kbap_review.graph import Scorers, build_graph
-from kbap_review.scoring import FieldScore
+from kbap_review.scoring import TARGET_LANGS, FieldScore
 
 TH = Thresholds(description=70, translations=70, avoidance=70)
 
@@ -20,7 +20,7 @@ def make_scorers(desc=85, trans=90, avoid=80) -> Scorers:
         return FieldScore(score=desc, reason="설명 사유")
 
     async def t(food):
-        return {"en": FieldScore(score=trans, reason="영어 사유")}
+        return {lang: FieldScore(score=trans, reason="번역 사유") for lang in TARGET_LANGS}
 
     async def a(food):
         return FieldScore(score=avoid, reason="성분 사유")
