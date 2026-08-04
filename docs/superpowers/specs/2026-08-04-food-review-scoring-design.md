@@ -7,7 +7,7 @@
 배치가 채운 `food` 레코드(`PENDING_REVIEW`)를 사람 승인 **직전에** LLM으로 최종 검수한다.
 통과분은 `REVIEWED`로 넘겨 사람이 확인만 하게 하고, 미달분은 문제 컬럼을 비워
 기존 콘텐츠 배치가 재생성하도록 `INCOMPLETE`로 되돌린다. 재생성 기회는 2회까지 —
-그 이후에도 미달이면 컬럼을 유지한 채 `REVIEW_REJECTED`로 표시하고 사유(개조식 ≤10줄)를
+그 이후에도 미달이면 컬럼을 유지한 채 `REVIEW_REJECTED`로 표시하고 사유(개조식, 1000자 이내)를
 붙여 사람이 직접 판단하게 한다.
 
 ## 상태 전이 (kbap 변경 후 기준)
@@ -84,7 +84,7 @@ class ReviewState(TypedDict):
 4. `aggregate` — LLM 없는 순수 함수. 필드군 점수 vs 임계값 →
    - 전부 통과 → `PASS`
    - 미달 & attempts < 2 → `RETRY` + failedFields
-   - 미달 & attempts ≥ 2 → `REJECT` + 각 노드 reason을 개조식 ≤10줄로 조립 (LLM 재호출 없음)
+   - 미달 & attempts ≥ 2 → `REJECT` + 각 노드 reason을 개조식 1000자 이내로 조립 (LLM 재호출 없음)
 5. `report` — kbap POST.
 
 **실행기 (그래프 밖 평범한 파이썬):**
@@ -136,7 +136,7 @@ kbap-langchain/
 
 ## 테스트
 
-- `aggregate` 유닛 테스트 집중 — 전부 통과 / 일부 미달 × attempts 분기 / REJECT 사유 ≤10줄 조립. LLM 없는 순수 함수.
+- `aggregate` 유닛 테스트 집중 — 전부 통과 / 일부 미달 × attempts 분기 / REJECT 사유 1000자 이내 조립. LLM 없는 순수 함수.
 - 그래프 통합 테스트: LLM fake 주입, PASS 경로 + RETRY 경로 각 1개.
 - 실 LLM 스모크: 실제 음식 2~3건 `--dry-run` 수동 확인 (자동화 안 함). avoidance 판정 품질을 특히 확인.
 

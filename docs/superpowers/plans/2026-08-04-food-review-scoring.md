@@ -15,7 +15,7 @@
 - verdict 문자열은 정확히 `"PASS"` / `"RETRY"` / `"REJECT"`.
 - failedFields 값은 정확히 `"description"` / `"translations"` / `"avoidance"`.
 - 대상 언어 9개(순서 포함): `["zh-Hans", "en", "ja", "zh-Hant", "vi", "id", "th", "ru", "es"]` (kbap `LanguageCode`에서 ko 제외).
-- REJECT의 `reviewNote`는 개조식 최대 10줄.
+- REJECT의 `reviewNote`는 개조식, 최대 1000자(`MAX_NOTE_CHARS`). 줄 순서는 설명 → 기피성분 → 실패 언어들 — 언어가 많아도 단일 줄 그룹(설명·기피성분)이 먼저 들어가 잘리지 않는다.
 - RETRY/REJECT 분기 기준: `food["reviewAttempts"] >= 2`면 REJECT.
 - LLM 실패는 판정 보류(POST 안 함) — 탈락은 오직 점수 미달만.
 - config 키: `kbap_api.base_url`, `llm.model`, `llm.avoidance_model`, `thresholds.{description,translations,avoidance}`, `concurrency`. 인증 토큰은 `KBAP_API_TOKEN` 환경변수.
@@ -403,12 +403,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   - `class Verdict(BaseModel)`: `verdict: Literal["PASS", "RETRY", "REJECT"]`, `failed_fields: list[str]`, `scores: dict`, `review_note: str | None`
     - `scores` 형식: `{"description": int, "translations": {lang: int}, "avoidance": int}`
   - `decide(review_attempts: int, description_score: FieldScore, translation_scores: dict[str, FieldScore], avoidance_score: FieldScore, thresholds: Thresholds) -> Verdict`
-  - `MAX_NOTE_LINES = 10`
+  - `MAX_NOTE_CHARS = 1000`
 
 - [ ] **Step 1: 실패하는 테스트 작성** (`tests/test_aggregate.py`)
 
 ```python
-from kbap_review.aggregate import MAX_NOTE_LINES, decide
+from kbap_review.aggregate import MAX_NOTE_CHARS, decide
 from kbap_review.config import Thresholds
 from kbap_review.scoring import FieldScore
 
@@ -461,10 +461,18 @@ def test_reject_at_two_attempts():
     assert "돼지고기 누락" in v.review_note
 
 
-def test_reject_note_capped_at_10_lines():
-    translations = {f"l{i}": fs(10, f"사유 {i}") for i in range(15)}
+def test_reject_note_capped_at_1000_chars():
+    translations = {f"l{i}": fs(10, "사" * 200) for i in range(15)}
     v = decide(2, fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
-    assert len(v.review_note.splitlines()) <= MAX_NOTE_LINES
+    assert len(v.review_note) <= MAX_NOTE_CHARS
+
+
+def test_reject_note_keeps_description_and_avoidance_when_many_langs_fail():
+    # 단일 줄 그룹(설명·기피성분)은 언어 줄보다 먼저 들어가 잘리지 않는다.
+    translations = {f"l{i}": fs(10, "사" * 200) for i in range(15)}
+    v = decide(2, fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
+    assert "설명 문제" in v.review_note
+    assert "성분 문제" in v.review_note
 
 
 def test_pass_at_two_attempts_still_passes():
@@ -488,7 +496,7 @@ from pydantic import BaseModel
 from kbap_review.config import Thresholds
 from kbap_review.scoring import FieldScore
 
-MAX_NOTE_LINES = 10
+MAX_NOTE_CHARS = 1000
 
 # 재검수(컬럼 비움 + INCOMPLETE 롤백) 허용 횟수 — 스펙: 2회까지, 이후 REJECT.
 MAX_RETRY_ATTEMPTS = 2
@@ -530,18 +538,19 @@ def decide(
     if review_attempts < MAX_RETRY_ATTEMPTS:
         return Verdict(verdict="RETRY", failed_fields=failed, scores=scores)
 
+    # 단일 줄 그룹(설명·기피성분)을 먼저 넣어 언어 줄이 많아도 잘려나가지 않게 한다.
     note_lines: list[str] = []
     if "description" in failed:
         note_lines.append(f"- 설명({description_score.score}점): {description_score.reason}")
-    for lang, s in failed_langs.items():
-        note_lines.append(f"- 번역 {lang}({s.score}점): {s.reason}")
     if "avoidance" in failed:
         note_lines.append(f"- 기피성분·매운맛({avoidance_score.score}점): {avoidance_score.reason}")
+    for lang, s in failed_langs.items():
+        note_lines.append(f"- 번역 {lang}({s.score}점): {s.reason}")
     return Verdict(
         verdict="REJECT",
         failed_fields=failed,
         scores=scores,
-        review_note="\n".join(note_lines[:MAX_NOTE_LINES]),
+        review_note="\n".join(note_lines)[:MAX_NOTE_CHARS],
     )
 ```
 
