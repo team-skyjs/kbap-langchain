@@ -42,7 +42,10 @@ POST /admin/foods/{id}/review-result
 ```
 
 - 컬럼 비우기·상태 전이·낙관적 락·상태 가드(`PENDING_REVIEW`일 때만 반영)는 전부 kbap 책임 — 도메인 규칙은 `Food` 엔티티 한 곳에 남는다.
-- RETRY/REJECT 분기는 조회 응답의 `reviewAttempts`로 파이썬이 결정한다.
+- RETRY/REJECT 분기는 조회 응답의 `reviewAttempts`로 파이썬이 결정한다. **이 필드는 필수다** —
+  누락되거나 이름이 다르면(`review_attempts` 등) 파이썬이 `KeyError`로 그 건을 보류(HELD)한다.
+  기본값 0으로 넘어가면 실패 건이 영원히 RETRY를 돌며 매 사이클 컬럼을 비우고 LLM을 태우게 되므로,
+  조용히 넘어가지 않고 멈추는 쪽을 택했다.
 - 상태 가드 덕에 POST는 멱등 — 파이썬 쪽 중복 전송을 걱정하지 않는다.
 
 **failedFields → kbap이 비울 컬럼:**
@@ -106,11 +109,12 @@ kbap_api:
 llm:
   model: gemini-2.5-flash        # 기본. 언제든 교체 가능
   avoidance_model: gemini-2.5-flash  # 안전 직결 노드만 별도 오버라이드 (판정 이상 시 gpt-5-mini 등으로)
+  timeout_seconds: 120           # LLM 콜 타임아웃 — 무인 배치라 필수. 없으면 멈춘 호출 하나가 전체 실행을 잡는다
 thresholds:                      # 필드군별 임계값 — 운영하며 튜닝
   description: 70
   translations: 70
   avoidance: 70
-concurrency: 5
+concurrency: 5                   # 동시 실행 "그래프" 수. 그래프당 LLM 3콜이라 실제 상한은 15 — Gemini RPM 쿼터는 이 값으로 확인
 ```
 
 - 모델 선택 근거: 채점(판정) 작업이라 생성보다 요구 지능이 낮고, 다국어 판정은 Gemini 강점.
