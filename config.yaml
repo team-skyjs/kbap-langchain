@@ -9,5 +9,5 @@ llm:
 thresholds: # 필드군별 통과 임계값 — 운영하며 튜닝
   description: 70
   translations: 60
-  avoidance: 75
+  avoidance: 70
 concurrency: 5
