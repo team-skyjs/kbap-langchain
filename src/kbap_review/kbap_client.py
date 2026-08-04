@@ -21,14 +21,20 @@ class KbapClient:
         # BaseResponse<AdminFoodContentReviewTargetsResponse> — {success, payload:{items:[...]}}
         return resp.json()["payload"]["items"]
 
-    async def post_review_result(self, food_id: int, verdict: Verdict) -> None:
-        """검수 결과 반영. 재시도 소진 여부 판단과 컬럼 비우기는 kbap 이 한다."""
+    async def post_review_result(self, food_id: int, verdict: Verdict) -> dict:
+        """검수 결과 반영. 재시도 소진 여부 판단과 컬럼 비우기는 kbap 이 한다.
+
+        반영 후 상태를 돌려준다 — {foodId, contentStatus, contentReviewAttempts,
+        contentReviewRejectionReason}. 탈락 건이 재생성으로 갔는지 REVIEW_REJECTED 로
+        갔는지는 이 값으로만 알 수 있다.
+        """
         body: dict = {"passed": verdict.passed}
         if not verdict.passed:
             body["rejectedFields"] = verdict.rejected_fields
             body["reason"] = verdict.reason
         resp = await self._client.post(f"{CONTENT_REVIEWS}/{food_id}", json=body)
         resp.raise_for_status()
+        return resp.json()["payload"]
 
     async def aclose(self) -> None:
         await self._client.aclose()

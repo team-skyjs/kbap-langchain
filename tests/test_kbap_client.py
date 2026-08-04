@@ -43,10 +43,14 @@ async def test_post_passed_result():
     def handler(request: httpx.Request) -> httpx.Response:
         captured["path"] = request.url.path
         captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"success": True, "payload": {}})
+        return httpx.Response(200, json={"success": True, "payload": {"foodId": 7, "contentStatus": "REVIEWED"}})
 
     client = make_client(handler)
-    await client.post_review_result(7, Verdict(passed=True, rejected_fields=[], scores={"description": 90}))
+    applied = await client.post_review_result(
+        7, Verdict(passed=True, rejected_fields=[], scores={"description": 90})
+    )
+
+    assert applied == {"foodId": 7, "contentStatus": "REVIEWED"}
 
     assert captured["path"] == f"{PATH}/7"
     # 통과 결과에는 rejectedFields·reason 을 보내지 않는다.
@@ -58,7 +62,7 @@ async def test_post_rejected_result():
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"success": True, "payload": {}})
+        return httpx.Response(200, json={"success": True, "payload": {"foodId": 7, "contentStatus": "REVIEWED"}})
 
     client = make_client(handler)
     await client.post_review_result(

@@ -15,6 +15,7 @@ class FakeClient:
 
     async def post_review_result(self, food_id, verdict):
         self.posts.append((food_id, verdict))
+        return {"foodId": food_id, "contentStatus": "REVIEWED" if verdict.passed else "INCOMPLETE"}
 
 
 def make_scorers(desc=85, trans=90, avoid=80) -> Scorers:

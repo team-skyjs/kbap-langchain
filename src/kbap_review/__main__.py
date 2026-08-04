@@ -37,12 +37,14 @@ async def run_batch(graph, foods: list[dict], concurrency: int, callbacks: list)
             verdict = result["verdict"]
             key = "PASS" if verdict.passed else "FAIL"
             counts[key] += 1
+            applied = result.get("applied") or {}
             log.info(
-                "%s foodId=%s (%s) %s",
+                "%s foodId=%s (%s) %s -> %s",
                 key,
                 food.get("foodId"),
                 food.get("koreanName"),
                 verdict.rejected_fields or "",
+                applied.get("contentStatus", "dry-run"),
             )
     return counts
 

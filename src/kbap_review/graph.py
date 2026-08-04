@@ -30,6 +30,7 @@ class ReviewState(TypedDict, total=False):
     translation_scores: dict[str, FieldScore]
     avoidance_score: FieldScore
     verdict: Verdict
+    applied: dict  # kbap 반영 후 상태. dry_run 이면 없다.
 
 
 def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool = False):
@@ -53,9 +54,10 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
         }
 
     async def report(state: ReviewState):
-        if not dry_run:
-            await client.post_review_result(state["food"]["foodId"], state["verdict"])
-        return {}
+        if dry_run:
+            return {}
+        applied = await client.post_review_result(state["food"]["foodId"], state["verdict"])
+        return {"applied": applied}
 
     # LLM 노드만 재시도 — aggregate는 순수 함수, report 실패는 실행기의 보류 처리로 충분.
     # 기본 retry_on 은 ValueError 계열을 제외하는데, structured output 파싱 실패
