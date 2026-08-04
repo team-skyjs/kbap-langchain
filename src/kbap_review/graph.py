@@ -1,12 +1,21 @@
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple, TypedDict
 
+from langchain_core.exceptions import OutputParserException
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import RetryPolicy
+from langgraph.types import RetryPolicy, default_retry_on
+from pydantic import ValidationError
 
 from kbap_review.aggregate import Verdict, decide
 from kbap_review.config import Thresholds
 from kbap_review.scoring import FieldScore
+
+
+def _retryable(exc: Exception) -> bool:
+    """LangGraph 기본 정책 + structured output 파싱 실패."""
+    if isinstance(exc, (OutputParserException, ValidationError)):
+        return True
+    return default_retry_on(exc)
 
 
 class Scorers(NamedTuple):
@@ -36,7 +45,6 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
     def aggregate(state: ReviewState):
         return {
             "verdict": decide(
-                review_attempts=state["food"]["reviewAttempts"],
                 description_score=state["description_score"],
                 translation_scores=state["translation_scores"],
                 avoidance_score=state["avoidance_score"],
@@ -46,11 +54,14 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
 
     async def report(state: ReviewState):
         if not dry_run:
-            await client.post_review_result(state["food"]["id"], state["verdict"])
+            await client.post_review_result(state["food"]["foodId"], state["verdict"])
         return {}
 
     # LLM 노드만 재시도 — aggregate는 순수 함수, report 실패는 실행기의 보류 처리로 충분.
-    retry = RetryPolicy(max_attempts=2)
+    # 기본 retry_on 은 ValueError 계열을 제외하는데, structured output 파싱 실패
+    # (OutputParserException·pydantic ValidationError)가 전부 ValueError 하위라 한 번도
+    # 재시도되지 않는다. 모델이 다시 뽑으면 통과하는 경우가 많아 명시적으로 포함시킨다.
+    retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ReviewState)
     g.add_node("score_description", score_description, retry_policy=retry)
     g.add_node("score_translations", score_translations, retry_policy=retry)

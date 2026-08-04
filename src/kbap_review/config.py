@@ -2,13 +2,15 @@ import os
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Thresholds(BaseModel):
-    description: int
-    translations: int
-    avoidance: int
+    # 모델 점수가 0~100 이므로 임계값도 그 범위여야 한다. 음수면 전부 통과해
+    # 기피성분 미달까지 REVIEWED 로 나가고, 100 초과면 전부 탈락한다.
+    description: int = Field(ge=0, le=100)
+    translations: int = Field(ge=0, le=100)
+    avoidance: int = Field(ge=0, le=100)
 
 
 class AppConfig(BaseModel):
@@ -17,8 +19,9 @@ class AppConfig(BaseModel):
     model: str
     avoidance_model: str
     thresholds: Thresholds
-    concurrency: int
-    timeout_seconds: int = 120
+    # 0 이면 Semaphore(0) 이 모든 코루틴을 영구히 막아 무인 배치가 조용히 멈춘다.
+    concurrency: int = Field(ge=1)
+    timeout_seconds: int = Field(default=120, ge=1)
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:

@@ -22,16 +22,28 @@ async def run_batch(graph, foods: list[dict], concurrency: int, callbacks: list)
 
     results = await asyncio.gather(*(one(f) for f in foods), return_exceptions=True)
 
-    counts = {"PASS": 0, "RETRY": 0, "REJECT": 0, "HELD": 0}
+    # 탈락 건이 재생성으로 돌아갈지 REVIEW_REJECTED 로 갈지는 kbap 이 정한다 —
+    # 여기서는 통과/탈락/보류만 센다.
+    counts = {"PASS": 0, "FAIL": 0, "HELD": 0}
     for food, result in zip(foods, results):
         if isinstance(result, BaseException):
             # LLM/POST 실패 — 판정 보류. PENDING_REVIEW에 남아 다음 실행에서 자연 재시도.
             counts["HELD"] += 1
-            log.warning("보류 id=%s (%s): %s", food["id"], food.get("koreanName"), result)
+            # foodId 자체가 없는 계약 위반도 여기로 떨어지므로 get 으로 읽는다.
+            log.warning(
+                "보류 foodId=%s (%s): %s", food.get("foodId"), food.get("koreanName"), result
+            )
         else:
             verdict = result["verdict"]
-            counts[verdict.verdict] += 1
-            log.info("%s id=%s (%s)", verdict.verdict, food["id"], food.get("koreanName"))
+            key = "PASS" if verdict.passed else "FAIL"
+            counts[key] += 1
+            log.info(
+                "%s foodId=%s (%s) %s",
+                key,
+                food.get("foodId"),
+                food.get("koreanName"),
+                verdict.rejected_fields or "",
+            )
     return counts
 
 

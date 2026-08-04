@@ -1,5 +1,6 @@
 kbap_api:
-  base_url: https://dev.kbap.site/api # 홈서버 배포 시 실제 kbap 주소로 교체. 인증: KBAP_API_TOKEN 환경변수
+  # 호스트까지만 적는다 — /api/v1/admin/... 경로는 클라이언트가 붙인다.
+  base_url: https://dev.kbap.site # 인증: KBAP_API_TOKEN 환경변수
 llm:
   # "provider:model" 이면 그 벤더를, 접두사 없이 gemini* 면 google_genai 를 쓴다.
   # 교체 예시: gemini-2.5-flash / openai:gpt-5-nano / openai:gpt-5-mini

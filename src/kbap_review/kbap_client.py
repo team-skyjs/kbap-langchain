@@ -2,6 +2,9 @@ import httpx
 
 from kbap_review.aggregate import Verdict
 
+# kbap ApiPaths.ADMIN = "/api/v1/admin". base_url 은 호스트까지만 준다.
+CONTENT_REVIEWS = "/api/v1/admin/foods/content-reviews"
+
 
 class KbapClient:
     def __init__(self, base_url: str, token: str):
@@ -12,18 +15,19 @@ class KbapClient:
         )
 
     async def fetch_review_candidates(self, limit: int) -> list[dict]:
-        resp = await self._client.get("/admin/foods/review-candidates", params={"limit": limit})
+        """PENDING_REVIEW 상태 음식 목록. 항목 키는 foodId / contentReviewAttempts."""
+        resp = await self._client.get(CONTENT_REVIEWS, params={"limit": limit})
         resp.raise_for_status()
-        return resp.json()
+        # BaseResponse<AdminFoodContentReviewTargetsResponse> — {success, payload:{items:[...]}}
+        return resp.json()["payload"]["items"]
 
     async def post_review_result(self, food_id: int, verdict: Verdict) -> None:
-        body: dict = {"verdict": verdict.verdict, "scores": verdict.scores}
-        if verdict.verdict == "RETRY":
-            body["failedFields"] = verdict.failed_fields
-        elif verdict.verdict == "REJECT":
-            body["failedFields"] = verdict.failed_fields
-            body["reviewNote"] = verdict.review_note
-        resp = await self._client.post(f"/admin/foods/{food_id}/review-result", json=body)
+        """검수 결과 반영. 재시도 소진 여부 판단과 컬럼 비우기는 kbap 이 한다."""
+        body: dict = {"passed": verdict.passed}
+        if not verdict.passed:
+            body["rejectedFields"] = verdict.rejected_fields
+            body["reason"] = verdict.reason
+        resp = await self._client.post(f"{CONTENT_REVIEWS}/{food_id}", json=body)
         resp.raise_for_status()
 
     async def aclose(self) -> None:
