@@ -63,7 +63,14 @@ def translations_prompt(food: dict) -> str:
 이름 번역: {json.dumps(food["nameTranslations"], ensure_ascii=False)}
 설명 번역: {json.dumps(food["descriptionTranslations"], ensure_ascii=False)}
 
-대상 언어 {len(TARGET_LANGS)}개 전부에 대해 items 배열로 반환하세요: {", ".join(TARGET_LANGS)}
+출력 규칙 — 반드시 지키세요:
+- items 배열은 **정확히 {len(TARGET_LANGS)}개** 항목이어야 합니다. 하나라도 빠지면 안 됩니다.
+- 아래 순서 그대로, 이 lang 값을 문자 그대로 사용하세요: {", ".join(TARGET_LANGS)}
+- 여러 언어를 한 항목으로 합치거나, 점수가 같다는 이유로 생략하지 마세요.
+  점수가 같아도 {len(TARGET_LANGS)}개를 각각 적으세요.
+- 판단이 어려운 언어도 건너뛰지 말고, 확신이 없으면 낮은 점수를 주세요.
+  빠뜨린 언어는 0점으로 간주되어 멀쩡한 번역까지 폐기됩니다.
+
 각 항목은 lang, score(0~100), reason(한국어 한 문장)입니다."""
 
 
