@@ -5,6 +5,25 @@ from pydantic import BaseModel, Field
 # kbap LanguageCode에서 ko 제외 9개 — 순서 포함 일치해야 한다.
 TARGET_LANGS = ["zh-Hans", "en", "ja", "zh-Hant", "vi", "id", "th", "ru", "es"]
 
+# 기피성분 후보 코드 — kbap AvoidanceSubstanceCode enum(= avoidance_substance 시드)과 같아야 한다.
+# 생성기(SpringAiFoodAvoidanceAssessmentClient)는 이 안에서만 코드를 고르므로, 검수기도 같은
+# 목록을 알아야 "목록에 없어서 못 넣은 성분"을 누락으로 오인해 깎지 않는다.
+# 카탈로그를 내려주는 API 가 없어 하드코딩한다 — enum 이 바뀌면 여기도 갱신할 것.
+AVOIDANCE_CODES = """EGG(계란) MILK(우유) DAIRY(유제품) GOAT_MILK(산양유) BUTTER(버터) GHEE(기버터)
+CHEESE(치즈) GELATIN(젤라틴) RENNET(레닛) HONEY(꿀) CARMINE(카민) PEANUT(땅콩) WALNUT(호두)
+PINE_NUT(잣) ALMOND(아몬드) CASHEW(캐슈넛) PISTACHIO(피스타치오) HAZELNUT(헤이즐넛)
+MACADAMIA(마카다미아) PECAN(피칸) BRAZIL_NUT(브라질너트) CHESTNUT(밤) SESAME(참깨)
+SUNFLOWER_SEED(해바라기씨) MUSTARD(겨자) WHEAT(밀) BUCKWHEAT(메밀) BARLEY(보리) RYE(호밀)
+OAT(귀리) CORN(옥수수) SOY(대두) LUPIN(루핀) PEA(완두콩) CHICKPEA(병아리콩) LENTIL(렌틸콩)
+SHRIMP(새우) SALTED_SHRIMP(새우젓) CRAB(게) CRAYFISH(가재) LOBSTER(랍스터) SQUID(오징어)
+OCTOPUS(문어) OYSTER(굴) OYSTER_SAUCE(굴소스) ABALONE(전복) MUSSEL(홍합) CLAM(조개)
+SHORT_NECK_CLAM(바지락) SCALLOP(가리비) SEAFOOD(해산물) FISH(생선) MACKEREL(고등어) SALMON(연어)
+TUNA(참치) COD(대구) ANCHOVY(멸치) FISH_SAUCE(액젓) BROTH(육수) DASHI(다시) BEEF(소고기)
+PORK(돼지고기) LARD(라드) TALLOW(우지) CHICKEN(닭고기) POULTRY(가금류) PEACH(복숭아)
+TOMATO(토마토) CELERY(셀러리) POTATO(감자) CARROT(당근) ONION(양파) GARLIC(마늘) SCALLION(파)
+CHIVE(부추) WILD_CHIVE(달래) ASAFOETIDA(흥거) ALCOHOL(알코올) MIRIN(미림) COOKING_WINE(맛술)
+SULFITES(아황산류)"""
+
 # 형식 검증(글자 수, 9개 언어 존재 여부, spiciness 범위)은 업스트림 kbap 배치가
 # PENDING_REVIEW 로 올리기 전에 이미 끝냈다(Food.needsNameTranslations / assessAvoidance).
 # 여기서 다시 보면 모델 주의력만 나눠 쓰고 배치가 보장한 걸 깎을 위험이 있어 명시적으로 배제한다.
@@ -15,15 +34,18 @@ _CONTENT_ONLY = """형식 검증은 이미 끝났습니다 — 글자 수, 번�
 보지 마세요. 오직 내용이 맞는가만 판단하세요."""
 
 
+# reason 을 score 보다 앞에 둔다 — structured output 은 필드 순서대로 생성되므로, score 가
+# 먼저면 모델이 근거를 세우기 전에 숫자부터 뱉는다. 기피성분 스모크에서 주요 성분(PORK) 누락을
+# 6회 중 2회만 잡던 것이 순서를 뒤집자 개선됐다.
 class FieldScore(BaseModel):
-    score: int = Field(ge=0, le=100)
     reason: str
+    score: int = Field(ge=0, le=100)
 
 
 class TranslationLangScore(BaseModel):
     lang: str
-    score: int = Field(ge=0, le=100)
     reason: str
+    score: int = Field(ge=0, le=100)
 
 
 class TranslationScores(BaseModel):
@@ -84,15 +106,35 @@ def avoidance_prompt(food: dict) -> str:
 
 {_CONTENT_ONLY}
 
-채점 기준:
-- **생뚱맞은 성분이 섞여 있지 않은가** — 이 음식 레시피와 아무 상관 없는 성분이
-  목록에 올라와 있거나, 실제보다 터무니없이 높은 확률이 붙어 있지 않은가
-  (예: 김치찌개에 갑각류 90%). 관광객이 먹을 수 있는 음식을 못 먹는다고 잘못 걸러낸다.
-- 명백히 포함되는 주요 성분이 목록에서 빠지지 않았는가 (알레르기·비건·종교 안전 직결)
-- 남은 성분들의 포함 확률이 일반적인 레시피 감각과 맞는가
-- 매운맛 등급이 이 음식에 타당한가 (예: 물냉면 8, 불닭 1 이면 이상하다)
+# inclusionPercent 의 의미 (생성 규격)
+"손님이 아무 식당에서나 이 메뉴를 시켰을 때, 그 한 접시에 이 성분이 들어 있을 확률."
+양(量)이 아니라 포함 여부의 확률입니다. 95~100 정의상 반드시 / 80~95 표준 레시피 핵심 재료 /
+55~80 대부분 넣지만 집집마다 다름 / 30~55 흔한 선택 재료·고명·양념 / 10~30 일부 식당·변형만 /
+1~10 미량·교차오염. 핵심 재료에 90~100 이 붙는 것은 규격대로이니 과대평가로 깎지 마세요.
 
-너무 예민하지 않게, 일반적인 레시피 기준으로 판단하세요. 특정 브랜드·식당 레시피가 아니라, 한국 음식의 일반적인 레시피를 기준으로 판단합니다. 관광객이 먹을 수 있는 음식인지, 알레르기·비건·종교 안전에 문제가 없는지 판단하는 것이 목적입니다.
+# spiciness 의 의미 (생성 규격 — 이 척도로만 판단)
+0 맵지 않음(계란말이) / 1~3 약간 매콤(제육볶음 순한맛, **김치찌개**) /
+4~6 보통 매움(떡볶이, 닭갈비) / 7~10 매우 매움(불닭, 마라 계열).
+체감이 아니라 이 척도 기준으로 어긋날 때만 감점하세요.
+
+# 후보 성분 코드 (생성기가 고를 수 있는 전체 목록)
+{AVOIDANCE_CODES}
+이 목록에 없는 성분(김치·고춧가루·된장 등)은 애초에 표기할 수 없습니다.
+목록 밖 성분이 빠졌다는 이유로 절대 감점하지 마세요.
+
+채점 절차 — reason 에 이 순서대로 쓰고 마지막에 score 를 매기세요:
+1. **누락 대조 (가장 중요)** — 먼저 이 음식의 대표 레시피에 거의 항상 들어가는 재료를
+   떠올리고, 그중 후보 코드 목록에 있는 것을 하나씩 위 기피성분 목록과 대조하세요.
+   목록에 있어야 할 주요 성분이 빠져 있으면 그 코드를 reason 에 적고 크게 감점하세요
+   (50점 이하). 알레르기·비건·종교 안전 직결이라 누락이 가장 위험합니다.
+   예: 돼지고기를 넣고 끓이는 음식에 PORK 가 없음, 밀가루 면 요리에 WHEAT 가 없음.
+2. **생뚱맞은 성분** — 이 음식 레시피와 아무 상관 없는 성분이 올라와 있거나, 실제보다
+   터무니없이 높은 확률이 붙어 있지 않은가 (예: 김치찌개에 갑각류 90%).
+   관광객이 먹을 수 있는 음식을 못 먹는다고 잘못 걸러낸다.
+3. **확률·매운맛** — 남은 성분의 포함 확률과 spiciness 가 위 구간 정의와 맞는가
+
+특정 브랜드·식당 레시피가 아니라 한국 음식의 일반적인 레시피를 기준으로 판단합니다.
+관광객이 먹을 수 있는 음식인지, 알레르기·비건·종교 안전에 문제가 없는지 판단하는 것이 목적입니다.
 
 음식 이름: {food["koreanName"]}
 기피성분 목록: {json.dumps(food["avoidanceSubstances"], ensure_ascii=False)}

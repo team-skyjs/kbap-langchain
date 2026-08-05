@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from kbap_review.scoring import (
+    AVOIDANCE_CODES,
     TARGET_LANGS,
     FieldScore,
     TranslationLangScore,
@@ -58,6 +59,23 @@ def test_avoidance_prompt_contains_substances_and_spiciness():
     assert "PORK" in p
     assert "95" in p
     assert "7" in p
+
+
+def test_avoidance_prompt_carries_generator_contract():
+    """생성기(SpringAiFoodAvoidanceAssessmentClient)와 같은 척도·후보 목록을 실어야 한다.
+
+    이게 빠지면 검수기가 제 감각으로 판단해, 규격대로 생성된 데이터를 깎고(매운맛 척도 불일치)
+    후보에 없어 넣을 수 없던 성분을 누락으로 감점한다 — 스모크에서 실제로 나온 실패.
+    """
+    p = avoidance_prompt(FOOD)
+    assert AVOIDANCE_CODES in p
+    assert "1~3 약간 매콤" in p  # 생성기 척도. 없으면 김치찌개 3점을 "너무 낮다"고 깎는다.
+    assert "양(量)이 아니라 포함 여부의 확률" in p
+
+
+def test_field_score_puts_reason_before_score():
+    """structured output 은 필드 순서대로 생성된다 — 근거가 점수보다 먼저 나와야 한다."""
+    assert list(FieldScore.model_fields) == ["reason", "score"]
 
 
 def test_lang_scores_backfills_missing_languages_with_zero():
