@@ -1,4 +1,4 @@
-from kbap_namefix.pipeline import NameFix, clean_batch, clean_one, snap
+from kbap.namefix import NameFix, clean_batch, clean_one, snap
 
 ANCHORS = ["김치찌개", "된장찌개", "비빔밥", "돼지고기 김치찌개"]
 

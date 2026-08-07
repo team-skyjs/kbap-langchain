@@ -1,8 +1,10 @@
+"""스캔 음식 이름 정제 — 자모 스냅·LLM 보수적 정규화·배치 실행."""
+
+from collections.abc import Awaitable, Callable
 import asyncio
 import difflib
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel
 
@@ -113,7 +115,7 @@ reason(한국어 한 문장)과 corrected(정제된 이름)를 반환하세요."
 
 def make_normalizer(model_name: str, timeout: int, callbacks: list) -> Normalizer:
     """실 LLM 기반 정규화기. import를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
-    from kbap_review.scoring import init_model
+    from kbap.review import init_model
 
     llm = init_model(model_name, timeout).with_structured_output(NameFix)
 

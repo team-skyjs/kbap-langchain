@@ -1,26 +1,164 @@
-"""콘텐츠 그래프의 실 LLM 노드 구현.
+"""이름 정제 → 생성 3갈래 → 검수 → 종합판정 콘텐츠 그래프 + SQS Lambda 핸들러.
 
-검수 쪽은 kbap_review.scoring 의 프롬프트·모델을 재사용하고,
-이름 정제는 kbap_namefix 를 그대로 쓴다.
+생성 프롬프트는 kbap(Spring) infra/llm/food 운영 프롬프트의 이식본이다 —
+원본이 바뀌면 여기도 맞출 것. JSON 형식 지시는 structured output 이 대체한다.
 
-생성 프롬프트는 kbap(Spring) infra/llm/food 의 운영 프롬프트를 이식한 것이다:
-SpringAiFoodNameTranslationClient / SpringAiFoodDescriptionClient(설명·번역을 두 노드로 분리)
-/ SpringAiFoodAvoidanceAssessmentClient. JSON 출력 형식 지시는 structured output 이
-대체하므로 뺐고, 의미 규칙·예시·휴리스틱은 그대로 가져왔다. 원본이 바뀌면 여기도 맞출 것.
-"""
+SQS 메시지 계약(초안): body = {"foodId": <int>, "scannedName": <str>}
+부분 실패 보고(ReportBatchItemFailures) 활성화가 전제다."""
 
+from collections.abc import Awaitable, Callable
+from typing import NamedTuple, TypedDict
+import asyncio
 import json
+import logging
+import os
 import re
+import yaml
 
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import RetryPolicy
 from pydantic import BaseModel, Field
 
-from kbap_review.scoring import (
+from kbap.review import (
     AVOIDANCE_CODES,
     TARGET_LANGS,
     FieldScore,
+    Thresholds,
     TranslationScores,
+    _retryable,
     avoidance_prompt,
+    lang_scores,
+    make_callbacks,
 )
+
+
+class JudgeVerdict(BaseModel):
+    reason: str
+    passed: bool
+    rejected_fields: list[str] = []
+
+
+class ContentFns(NamedTuple):
+    clean_name: Callable[[str], Awaitable[dict]]
+    gen_name_tr: Callable[[str, str], Awaitable[dict]]
+    gen_desc: Callable[[str, str], Awaitable[str]]
+    gen_desc_tr: Callable[[str, str], Awaitable[dict]]
+    gen_avoid: Callable[[str, str], Awaitable[dict]]
+    rev_name_tr: Callable[[str, dict], Awaitable[FieldScore]]
+    rev_desc: Callable[[str, str, dict], Awaitable[FieldScore]]
+    rev_avoid: Callable[[str, dict], Awaitable[FieldScore]]
+    judge: Callable[[dict], Awaitable[JudgeVerdict]]
+
+
+class ContentState(TypedDict, total=False):
+    food_name: str  # 스캔 원본
+    cleaned_name: str
+    clean_reason: str
+    name_translations: dict[str, str]
+    nt_score: FieldScore
+    nt_attempts: int
+    nt_feedback: str
+    description: str
+    description_translations: dict[str, str]
+    desc_score: FieldScore
+    desc_attempts: int
+    desc_feedback: str
+    avoidance: dict
+    avoid_score: FieldScore
+    avoid_attempts: int
+    avoid_feedback: str
+    verdict: JudgeVerdict
+
+
+def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2):
+    """max_attempts=2 → 최초 1회 + 재시도 1회. 그 뒤에는 실패 점수·사유를 안고 판정으로 간다."""
+
+    async def clean_name(state: ContentState):
+        fix = await fns.clean_name(state["food_name"])
+        return {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
+
+    async def gen_name_tr(state: ContentState):
+        tr = await fns.gen_name_tr(state["cleaned_name"], state.get("nt_feedback", ""))
+        return {"name_translations": tr, "nt_attempts": state.get("nt_attempts", 0) + 1}
+
+    async def rev_name_tr(state: ContentState):
+        score = await fns.rev_name_tr(state["cleaned_name"], state["name_translations"])
+        return {"nt_score": score, "nt_feedback": score.reason}
+
+    async def gen_desc(state: ContentState):
+        desc = await fns.gen_desc(state["cleaned_name"], state.get("desc_feedback", ""))
+        return {"description": desc, "desc_attempts": state.get("desc_attempts", 0) + 1}
+
+    async def gen_desc_tr(state: ContentState):
+        tr = await fns.gen_desc_tr(state["cleaned_name"], state["description"])
+        return {"description_translations": tr}
+
+    async def rev_desc(state: ContentState):
+        score = await fns.rev_desc(
+            state["cleaned_name"], state["description"], state["description_translations"]
+        )
+        return {"desc_score": score, "desc_feedback": score.reason}
+
+    async def gen_avoid(state: ContentState):
+        avoid = await fns.gen_avoid(state["cleaned_name"], state.get("avoid_feedback", ""))
+        return {"avoidance": avoid, "avoid_attempts": state.get("avoid_attempts", 0) + 1}
+
+    async def rev_avoid(state: ContentState):
+        score = await fns.rev_avoid(state["cleaned_name"], state["avoidance"])
+        return {"avoid_score": score, "avoid_feedback": score.reason}
+
+    async def judge(state: ContentState):
+        return {"verdict": await fns.judge(dict(state))}
+
+    def _route(score_key: str, attempts_key: str, threshold: int, retry_target: str):
+        def route(state: ContentState) -> str:
+            failed = state[score_key].score < threshold
+            if failed and state[attempts_key] < max_attempts:
+                return retry_target
+            return "judge"
+
+        return route
+
+    # structured output 파싱 실패 재시도 — kbap_review.graph 와 같은 이유(전부 LLM 노드).
+    retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
+    g = StateGraph(ContentState)
+    g.add_node("clean_name", clean_name, retry_policy=retry)
+    g.add_node("gen_name_tr", gen_name_tr, retry_policy=retry)
+    g.add_node("rev_name_tr", rev_name_tr, retry_policy=retry)
+    g.add_node("gen_desc", gen_desc, retry_policy=retry)
+    g.add_node("gen_desc_tr", gen_desc_tr, retry_policy=retry)
+    g.add_node("rev_desc", rev_desc, retry_policy=retry)
+    g.add_node("gen_avoid", gen_avoid, retry_policy=retry)
+    g.add_node("rev_avoid", rev_avoid, retry_policy=retry)
+    # defer=True — 세 갈래가 서로 다른 횟수로 재시도해도, 전부 끝난 뒤 정확히 한 번 실행된다.
+    g.add_node("judge", judge, defer=True, retry_policy=retry)
+
+    g.add_edge(START, "clean_name")
+    g.add_edge("clean_name", "gen_name_tr")
+    g.add_edge("clean_name", "gen_desc")
+    g.add_edge("clean_name", "gen_avoid")
+    g.add_edge("gen_name_tr", "rev_name_tr")
+    g.add_edge("gen_desc", "gen_desc_tr")  # 설명 재생성 시 번역도 같이 다시 만든다
+    g.add_edge("gen_desc_tr", "rev_desc")
+    g.add_edge("gen_avoid", "rev_avoid")
+    g.add_conditional_edges(
+        "rev_name_tr",
+        _route("nt_score", "nt_attempts", thresholds.translations, "gen_name_tr"),
+        ["gen_name_tr", "judge"],
+    )
+    g.add_conditional_edges(
+        "rev_desc",
+        _route("desc_score", "desc_attempts", thresholds.description, "gen_desc"),
+        ["gen_desc", "judge"],
+    )
+    g.add_conditional_edges(
+        "rev_avoid",
+        _route("avoid_score", "avoid_attempts", thresholds.avoidance, "gen_avoid"),
+        ["gen_avoid", "judge"],
+    )
+    g.add_edge("judge", END)
+    return g.compile()
+
 
 LANGS = ", ".join(TARGET_LANGS)
 
@@ -261,9 +399,8 @@ reason(한국어 1~2문장), passed, rejected_fields 를 반환하세요."""
 
 def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = None):
     """실 LLM 기반 노드 세트. import 를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
-    from kbap_content.graph import ContentFns, JudgeVerdict
-    from kbap_namefix.pipeline import clean_one, make_normalizer
-    from kbap_review.scoring import init_model, lang_scores
+    from kbap.namefix import clean_one, make_normalizer
+    from kbap.review import init_model
 
     base = init_model(model, timeout)
     judge_llm = init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict)
@@ -333,3 +470,70 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
         rev_avoid=rev_avoid,
         judge=judge,
     )
+
+
+log = logging.getLogger("kbap.content")
+
+_graph = None
+
+
+def _load_graph():
+    """콜드스타트 1회만 그래프를 만든다."""
+    global _graph
+    if _graph is None:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        with open(os.environ.get("CONFIG_PATH", "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        llm = raw["llm"]
+        thresholds = Thresholds(**raw["thresholds"])
+        fns = make_fns(
+            llm["model"],
+            llm.get("timeout_seconds", 120),
+            thresholds,
+            judge_model=llm.get("judge_model"),
+        )
+        _graph = build_content_graph(fns, thresholds)
+    return _graph
+
+
+async def process_event(event: dict, graph, concurrency: int, callbacks: list = []) -> list[str]:
+    """레코드들을 동시 처리하고 실패한 messageId 목록을 돌려준다."""
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(record: dict) -> str | None:
+        message_id = record["messageId"]
+        try:
+            body = json.loads(record["body"])
+            food_id, name = body["foodId"], body["scannedName"]
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            log.warning("계약 위반 메시지 %s: %s", message_id, e)
+            return message_id
+        async with sem:
+            try:
+                result = await graph.ainvoke(
+                    {"food_name": name}, config={"callbacks": callbacks}
+                )
+            except Exception:
+                log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
+                return message_id
+        verdict = result["verdict"]
+        # TODO(kbap 계약 확정 시): PASS/FAIL + 사유를 결과 반영 API 로 POST — 멱등이어야 한다.
+        log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
+        return None
+
+    results = await asyncio.gather(*(one(r) for r in event.get("Records", [])))
+    return [message_id for message_id in results if message_id]
+
+
+def handler(event, context):
+    graph = _load_graph()
+    concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
+    failed = asyncio.run(process_event(event, graph, concurrency, make_callbacks()))
+
+    # Lambda 는 리턴 후 프로세스를 얼린다 — atexit 이 안 불리므로 여기서 직접 flush.
+    from langfuse import get_client
+
+    get_client().flush()
+    return {"batchItemFailures": [{"itemIdentifier": message_id} for message_id in failed]}
