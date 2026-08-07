@@ -119,37 +119,19 @@ TOMATO(토마토) CELERY(셀러리) POTATO(감자) CARROT(당근) ONION(양파) 
 CHIVE(부추) WILD_CHIVE(달래) ASAFOETIDA(흥거) ALCOHOL(알코올) MIRIN(미림) COOKING_WINE(맛술)
 SULFITES(아황산류)"""
 
-# ===== Langfuse 프롬프트 관리 =====
-# 프롬프트의 소스는 Langfuse(production 라벨)다. 아래 *_TEMPLATE 상수는 최초 업로드
-# 원본이자 Langfuse 접속 불가·키 미설정 시 폴백이다. UI에서 수정한 버전은 코드에
-# 반영되지 않으므로 폴백은 "마지막으로 코드에 있던 버전"으로 동작한다.
+# 템플릿 본문은 kbap.prompts 에 모여 있다. 여기 함수들은 변수 조립만 담당한다.
 #
-# 계약 주의: 후보 코드 목록·언어 목록·structured output 필드명이 걸린 부분은
-# {{candidate_codes}}·{{langs}} 같은 변수로 주입한다 — UI 편집으로 코드 계약이
-# 깨지지 않게 하기 위해서다.
-
-
-def _compile_local(template: str, variables: dict) -> str:
-    for key, value in variables.items():
-        template = template.replace("{{" + key + "}}", str(value))
-    return template
-
-
-def render_prompt(prompt_name: str, template: str, **variables) -> str:
-    """Langfuse production 프롬프트를 가져와 변수를 치환한다. 실패 시 코드 폴백."""
-    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
-        return _compile_local(template, variables)
-    from langfuse import get_client
-
-    prompt = get_client().get_prompt(prompt_name, label="production", fallback=template)
-    return prompt.compile(**variables)
-
-
 # 형식 검증(글자 수, 9개 언어 존재 여부, spiciness 범위)은 상위 kbap 배치가
 # PENDING_REVIEW로 올리기 전에 끝낸다(Food.needsNameTranslations / assessAvoidance).
 # 여기서 다시 검증하면 모델의 주의력만 분산되고 배치가 보장한 값을 감점할 수 있어
 # 각 템플릿에 "내용만 판단" 지시를 넣는다. 단, 언어 태그와 실제 표기 언어의 일치는
 # 내용 검증이므로 유지한다.
+from kbap.prompts import (
+    REVIEW_AVOIDANCE_TEMPLATE,
+    REVIEW_DESCRIPTION_TEMPLATE,
+    REVIEW_TRANSLATIONS_TEMPLATE,
+    render_prompt,
+)
 
 
 # structured output은 필드 순서대로 생성되므로 reason을 score보다 앞에 둔다. score가
@@ -170,24 +152,6 @@ class TranslationScores(BaseModel):
     items: list[TranslationLangScore]
 
 
-REVIEW_DESCRIPTION_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 아래 음식 설명이 외국인 관광객에게
-제공하기에 적합한지 0~100점으로 채점하세요.
-
-형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
-보지 마세요. 오직 내용이 맞는가만 판단하세요.
-
-채점 기준:
-- 설명이 실제로 이 음식을 정확히 설명하는가 (다른 음식 설명이 아닌가)
-- 재료·조리법·맛 서술에 사실과 다른 내용이 없는가 (들어가지 않는 재료를 지어내지 않았는가,
-  조리법을 다른 음식의 것과 섞지 않았는가)
-- 이 음식을 처음 보는 외국인이 읽고 무슨 음식인지 그려지는가
-
-음식 이름: {{name}}
-설명: {{description}}
-
-score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
-
-
 def description_prompt(food: dict) -> str:
     return render_prompt(
         "food-review-description",
@@ -195,36 +159,6 @@ def description_prompt(food: dict) -> str:
         name=food["koreanName"],
         description=food["description"],
     )
-
-
-REVIEW_TRANSLATIONS_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한국 음식의 이름·설명 번역을 언어별로
-0~100점으로 채점하세요.
-
-형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
-보지 마세요. 오직 내용이 맞는가만 판단하세요.
-
-채점 기준 (언어별로 각각) — 오역을 잡는 것이 목적입니다:
-- 이름 번역이 이 음식을 제대로 가리키는가. 글자만 옮겨 뜻이 달라지지 않았는가
-  (예: 다른 요리 이름이 되어버림, 재료명을 엉뚱하게 옮김)
-- 설명 번역이 한국어 원문과 같은 내용인가. 원문에 없는 재료·조리법을 지어내거나,
-  원문에 있는 핵심 정보를 빠뜨리거나, 뜻을 뒤집지 않았는가
-- 그 언어 화자가 읽었을 때 말이 되는가 (기계번역 티가 나는 어색한 직역인가)
-- lang 이 가리키는 언어로 실제로 쓰여 있는가 (예: th 자리에 영어가 들어가 있으면 0점)
-
-음식 이름(한국어): {{name}}
-설명(한국어): {{description}}
-이름 번역: {{name_translations}}
-설명 번역: {{description_translations}}
-
-출력 규칙 — 반드시 지키세요:
-- items 배열은 **정확히 {{lang_count}}개** 항목이어야 합니다. 하나라도 빠지면 안 됩니다.
-- 아래 순서 그대로, 이 lang 값을 문자 그대로 사용하세요: {{langs}}
-- 여러 언어를 한 항목으로 합치거나, 점수가 같다는 이유로 생략하지 마세요.
-  점수가 같아도 {{lang_count}}개를 각각 적으세요.
-- 판단이 어려운 언어도 건너뛰지 말고, 확신이 없으면 낮은 점수를 주세요.
-  빠뜨린 언어는 0점으로 간주되어 멀쩡한 번역까지 폐기됩니다.
-
-각 항목은 lang, score(0~100), reason(한국어 한 문장)입니다."""
 
 
 def translations_prompt(food: dict) -> str:
@@ -238,49 +172,6 @@ def translations_prompt(food: dict) -> str:
         lang_count=len(TARGET_LANGS),
         langs=", ".join(TARGET_LANGS),
     )
-
-
-REVIEW_AVOIDANCE_TEMPLATE = """당신은 식품 안전 검수자입니다. 아래 음식의 기피성분 목록과 매운맛 등급이
-일반적인 레시피 기준으로 타당한지 0~100점으로 채점하세요.
-
-형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
-보지 마세요. 오직 내용이 맞는가만 판단하세요.
-
-# inclusionPercent 의 의미 (생성 규격)
-"손님이 아무 식당에서나 이 메뉴를 시켰을 때, 그 한 접시에 이 성분이 들어 있을 확률."
-양(量)이 아니라 포함 여부의 확률입니다. 95~100 정의상 반드시 / 80~95 표준 레시피 핵심 재료 /
-55~80 대부분 넣지만 집집마다 다름 / 30~55 흔한 선택 재료·고명·양념 / 10~30 일부 식당·변형만 /
-1~10 미량·교차오염. 핵심 재료에 90~100 이 붙는 것은 규격대로이니 과대평가로 깎지 마세요.
-
-# spiciness 의 의미 (생성 규격 — 이 척도로만 판단)
-0 맵지 않음(계란말이) / 1~3 약간 매콤(제육볶음 순한맛, **김치찌개**) /
-4~6 보통 매움(떡볶이, 닭갈비) / 7~10 매우 매움(불닭, 마라 계열).
-체감이 아니라 이 척도 기준으로 어긋날 때만 감점하세요.
-
-# 후보 성분 코드 (생성기가 고를 수 있는 전체 목록)
-{{candidate_codes}}
-이 목록에 없는 성분(김치·고춧가루·된장 등)은 애초에 표기할 수 없습니다.
-목록 밖 성분이 빠졌다는 이유로 절대 감점하지 마세요.
-
-채점 절차 — reason 에 이 순서대로 쓰고 마지막에 score 를 매기세요:
-1. **누락 대조 (가장 중요)** — 먼저 이 음식의 대표 레시피에 거의 항상 들어가는 재료를
-   떠올리고, 그중 후보 코드 목록에 있는 것을 하나씩 위 기피성분 목록과 대조하세요.
-   목록에 있어야 할 주요 성분이 빠져 있으면 그 코드를 reason 에 적고 크게 감점하세요
-   (50점 이하). 알레르기·비건·종교 안전 직결이라 누락이 가장 위험합니다.
-   예: 돼지고기를 넣고 끓이는 음식에 PORK 가 없음, 밀가루 면 요리에 WHEAT 가 없음.
-2. **생뚱맞은 성분** — 이 음식 레시피와 아무 상관 없는 성분이 올라와 있거나, 실제보다
-   터무니없이 높은 확률이 붙어 있지 않은가 (예: 김치찌개에 갑각류 90%).
-   관광객이 먹을 수 있는 음식을 못 먹는다고 잘못 걸러낸다.
-3. **확률·매운맛** — 남은 성분의 포함 확률과 spiciness 가 위 구간 정의와 맞는가
-
-특정 브랜드·식당 레시피가 아니라 한국 음식의 일반적인 레시피를 기준으로 판단합니다.
-관광객이 먹을 수 있는 음식인지, 알레르기·비건·종교 안전에 문제가 없는지 판단하는 것이 목적입니다.
-
-음식 이름: {{name}}
-기피성분 목록: {{ingredients}}
-매운맛 등급: {{spiciness}}
-
-score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
 
 
 def avoidance_prompt(food: dict) -> str:

@@ -110,27 +110,8 @@ async def clean_batch(
     ]
 
 
-NAMEFIX_TEMPLATE = """당신은 메뉴판 OCR로 수집된 한국 음식 이름을 정제하는 도구입니다.
-아래 이름에서 다음만 고치세요:
-- 명백한 오타·OCR 오인식 (예: 김치찌게 → 김치찌개, 재육볶음 → 제육볶음)
-- 띄어쓰기 교정: 붙어 쓴 단어는 표준 띄어쓰기로 분리 (예: 돼지고기김치찌개 → 돼지고기 김치찌개),
-  어색하게 벌어진 띄어쓰기는 붙임 (예: 김치 찌개 → 김치찌개)
-- 음식 이름이 아닌 노이즈 제거: 가격, 메뉴 번호, 장식 문자, 과도한 공백
-
-하지 말 것:
-- 다른 음식으로 바꾸거나 새 이름을 짓지 마세요
-- 수식어를 지우지 마세요 ("할매손맛 김치찌개"의 "할매손맛"은 이름의 일부입니다)
-- 확신이 없으면 원본을 그대로 반환하세요. 원본 유지가 잘못된 교정보다 낫습니다.
-
-정제된 이름은 공백 포함 20자 이내여야 합니다.
-
-이름: {{name}}
-
-reason(한국어 한 문장)과 corrected(정제된 이름)를 반환하세요."""
-
-
 def normalize_prompt(name: str) -> str:
-    from kbap.review import render_prompt
+    from kbap.prompts import NAMEFIX_TEMPLATE, render_prompt
 
     return render_prompt("food-namefix", NAMEFIX_TEMPLATE, name=name)
 
