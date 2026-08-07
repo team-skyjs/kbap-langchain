@@ -99,6 +99,31 @@ async def test_happy_path_populates_all_content():
     assert len(rec["judge"]) == 1
 
 
+async def test_non_food_ends_graph_without_generation():
+    # "사리 추가" 같은 옵션·판독 불가 입력은 정제 노드에서 그래프를 끝내 생성 8콜을 아낀다.
+    rec = defaultdict(list)
+    fns = build_fns(rec)._replace(
+        clean_name=_rejected_clean_name(rec),
+    )
+    graph = build_content_graph(fns, TH)
+    state = await graph.ainvoke({"food_name": "사리 추가"})
+
+    assert state["verdict"].passed is False
+    assert "부적합" in state["verdict"].reason
+    assert rec["gen_nt"] == []
+    assert rec["generate_description"] == []
+    assert rec["generate_ingredients"] == []
+    assert rec["judge"] == []  # LLM 종합 판정도 건너뛴다
+
+
+def _rejected_clean_name(rec):
+    async def clean_name(name):
+        rec["clean"].append(name)
+        return {"name": name, "reason": "옵션 항목", "method": "rejected"}
+
+    return clean_name
+
+
 async def test_generators_receive_cleaned_name():
     rec = defaultdict(list)
     await run(rec)

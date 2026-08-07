@@ -57,6 +57,16 @@ async def test_clean_one_snap_skips_llm():
     assert calls == []  # 스냅에 성공하면 LLM을 호출하지 않는다
 
 
+async def test_clean_one_rejects_non_food():
+    async def normalize(name: str) -> NameFix:
+        return NameFix(reason="사리 추가는 옵션 항목", is_food=False, corrected=name)
+
+    result = await clean_one("사리 추가", [], normalize)
+    assert result["method"] == "rejected"
+    assert result["name"] == "사리 추가"  # 원본 유지 — 폐기 여부는 호출부가 결정한다
+    assert result["reason"] == "사리 추가는 옵션 항목"
+
+
 async def test_clean_one_llm_correction():
     result = await clean_one("냉             면 8,000원", [], make_normalizer("냉면"))
     assert result["name"] == "냉면"

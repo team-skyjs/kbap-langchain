@@ -88,10 +88,22 @@ class ContentState(TypedDict, total=False):
 def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2):
     """max_attempts=2이면 최초 호출 1회와 재시도 1회 후 실패 점수·사유를 담아 판정한다."""
 
-    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다
+    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다.
+    # 음식이 아니거나(옵션·안내 문구) 판독 불가면 여기서 FAIL verdict를 만들고 그래프를 끝내
+    # 생성·검수 8콜을 아낀다.
     async def clean_name(state: ContentState):
         fix = await fns.clean_name(state["food_name"])
-        return {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
+        out: ContentState = {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
+        if fix.get("method") == "rejected":
+            reason = fix.get("reason", "") or "음식 메뉴명이 아님"
+            out["verdict"] = JudgeVerdict(passed=False, reason=f"콘텐츠 생성 부적합: {reason}")
+        return out
+
+    # 부적합 판정이면 곧장 END, 아니면 3개 분기로 팬아웃한다
+    def route_after_clean(state: ContentState):
+        if "verdict" in state:
+            return END
+        return ["generate_name_translations", "generate_description", "generate_ingredients"]
 
     # ② 이름 번역 생성(분기 1) — 9개 언어. 재시도 시 탈락 사유(name_translation_feedback)를 프롬프트에 넣는다
     async def generate_name_translations(state: ContentState):
@@ -158,9 +170,11 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_node("judge", judge, defer=True, retry_policy=retry)
 
     g.add_edge(START, "clean_name")
-    g.add_edge("clean_name", "generate_name_translations")
-    g.add_edge("clean_name", "generate_description")
-    g.add_edge("clean_name", "generate_ingredients")
+    g.add_conditional_edges(
+        "clean_name",
+        route_after_clean,
+        ["generate_name_translations", "generate_description", "generate_ingredients", END],
+    )
     g.add_edge("generate_name_translations", "review_name_translations")
     g.add_edge("generate_description", "generate_description_translations")  # 설명을 재생성하면 번역도 함께 다시 만든다
     g.add_edge("generate_description_translations", "review_description")
