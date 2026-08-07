@@ -343,13 +343,15 @@ def make_fns(
     thresholds,
     judge_model: str | None = None,
     gen_model: str | None = None,
+    namefix_model: str | None = None,
     callbacks: list = [],
 ):
     """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다.
 
     역할별 모델 분리: judge 는 짧은 점수 요약을 읽고 통과/탈락만 정하므로 저렴한 모델로
-    내릴 수 있고(judge_model), 품질이 곧 결과물인 번역·설명 생성만 올릴 수 있다(gen_model).
-    기피성분 생성·검수는 안전 데이터라 기본 모델(model)을 유지한다.
+    내릴 수 있고(judge_model), 이름 정제는 _plausible·길이 방어선이 있어 실패해도 원본
+    유지로 끝나므로 역시 내릴 수 있다(namefix_model). 품질이 곧 결과물인 번역·설명 생성만
+    올릴 수 있다(gen_model). 기피성분 생성·검수는 안전 데이터라 기본 모델(model)을 유지한다.
 
     callbacks 는 노드를 그래프 밖에서 직접 호출할 때(노트북) 트레이싱용이다.
     그래프로 실행하면 ainvoke 의 config 콜백이 전파되므로 비워 둔다 — 둘 다 주면 중복 기록된다.
@@ -368,7 +370,7 @@ def make_fns(
     avoid_llm = _bind(base.with_structured_output(AvoidanceGen))
     score_llm = _bind(base.with_structured_output(FieldScore))
     tr_score_llm = _bind(base.with_structured_output(TranslationScores))
-    normalize = make_normalizer(model, timeout, callbacks=callbacks)
+    normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
     async def clean_name(name: str) -> dict:
         # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정된 음식명을 앵커로 주입
@@ -455,6 +457,7 @@ def load_graph(config_path: str | None = None):
         thresholds,
         judge_model=llm.get("judge_model"),
         gen_model=llm.get("gen_model"),
+        namefix_model=llm.get("namefix_model"),
     )
     return build_content_graph(fns, thresholds)
 
