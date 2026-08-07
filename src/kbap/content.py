@@ -22,7 +22,7 @@ import yaml
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from kbap.review import (
     AVOIDANCE_CODES,
@@ -178,15 +178,32 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
 LANGS = ", ".join(TARGET_LANGS)
 
 
+# 생성 결과 형식 검증 — 스프링이 LLM 응답 경계에서 require 로 잡던 규칙의 이관.
+# pydantic ValidationError 는 _retryable 에 걸려 그래프 RetryPolicy 가 재생성을 유도한다.
 # scoring.FieldScore와 같은 이유로 reason을 결과보다 앞에 두어 근거를 먼저 세우게 한다.
 class TranslationItem(BaseModel):
     lang: str
-    text: str
+    text: str = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("번역 값은 빈 문자열일 수 없다")
+        return v
 
 
 class Translations(BaseModel):
     reason: str
     items: list[TranslationItem]
+
+    @model_validator(mode="after")
+    def _all_target_langs(self):
+        # 9개 언어 전수·초과 금지 (스프링 TargetLanguageTexts 와 동일한 경계)
+        got = {i.lang for i in self.items}
+        if got != set(TARGET_LANGS) or len(self.items) != len(TARGET_LANGS):
+            raise ValueError(f"9개 언어 전수가 필요하다: got={sorted(got)}")
+        return self
 
 
 class AvoidanceItem(BaseModel):
@@ -201,7 +218,14 @@ class AvoidanceGen(BaseModel):
 
 
 class DescGen(BaseModel):
-    description: str
+    description: str = Field(max_length=255)
+
+    @field_validator("description")
+    @classmethod
+    def _not_blank_or_placeholder(cls, v: str) -> str:
+        if not v.strip() or v.strip() == "설명 준비 중":
+            raise ValueError("설명은 비거나 플레이스홀더일 수 없다")
+        return v
 
 
 # 과거 모델이 후보 밖 코드를 반환한 사례가 있어 저장 전에 걸러내며, 프롬프트에만 의존하지 않는다.
@@ -215,7 +239,8 @@ def valid_substances(items: list[dict]) -> list[dict]:
     out = []
     for item in items:
         code = item["code"]
-        if code not in VALID_CODES or code in seen:
+        # 0% 항목 제거 — 스프링 RiskLevel 은 1~100만 허용, 저장 전 동일하게 거른다.
+        if code not in VALID_CODES or code in seen or item["inclusionPercent"] < 1:
             continue
         seen.add(code)
         out.append(item)

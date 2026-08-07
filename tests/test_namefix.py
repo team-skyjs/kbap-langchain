@@ -100,6 +100,22 @@ async def test_clean_batch_isolates_failures():
     assert by_original["마라탕"]["method"] == "unchanged"
 
 
+def test_normalize_prompt_instructs_name_length_limit():
+    from kbap.namefix import normalize_prompt
+
+    assert "20자" in normalize_prompt("김치찌개")
+
+
+async def test_clean_one_rejects_overlong_correction():
+    # 정책: 정제된 이름은 20자 이내. 원본과 닮아 유사도 가드는 통과하는
+    # 띄어쓰기 교정이라도 20자를 넘으면 원본 유지로 떨어뜨린다.
+    original = "할매손맛묵은지김치찜명품장인정성가득"  # 18자
+    corrected = "할매손맛 묵은지 김치찜 명품 장인 정성 가득"  # 24자
+    result = await clean_one(original, [], make_normalizer(corrected))
+    assert result["name"] == original
+    assert result["method"] == "unchanged"
+
+
 def test_normalize_prompt_instructs_spacing():
     # 붙어 쓴 이름의 띄어쓰기 교정도 정제 범위다 — 지시가 빠지면 모델이 건드리지 않는다.
     from kbap.namefix import normalize_prompt

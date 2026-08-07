@@ -1,17 +1,22 @@
-"""콘텐츠 도메인(kbap.content) — 그래프 연결·재시도 규칙·성분 필터·SQS 핸들러."""
+"""콘텐츠 도메인(kbap.content) — 그래프 연결·재시도 규칙·형식 검증·SQS 핸들러."""
 
 import json
 from collections import defaultdict
 
+import pytest
+from pydantic import ValidationError
+
 from kbap.content import (
     VALID_CODES,
     ContentFns,
+    DescGen,
     JudgeVerdict,
+    Translations,
     build_content_graph,
     process_event,
     valid_substances,
 )
-from kbap.review import FieldScore, Thresholds
+from kbap.review import TARGET_LANGS, FieldScore, Thresholds
 
 TH = Thresholds(description=70, translations=70, avoidance=70)
 
@@ -162,6 +167,47 @@ def test_valid_substances_keeps_first_on_duplicate():
     items = [
         {"code": "PORK", "inclusionPercent": 95},
         {"code": "PORK", "inclusionPercent": 10},
+    ]
+    assert valid_substances(items) == [{"code": "PORK", "inclusionPercent": 95}]
+
+
+# ===== 생성 결과 형식 검증 (스프링 LLM 경계 require 이관) =====
+
+
+def test_desc_gen_rejects_over_255_chars():
+    with pytest.raises(ValidationError):
+        DescGen(description="가" * 256)
+    assert DescGen(description="가" * 255).description == "가" * 255
+
+
+def test_desc_gen_rejects_blank_and_placeholder():
+    with pytest.raises(ValidationError):
+        DescGen(description="   ")
+    with pytest.raises(ValidationError):
+        DescGen(description="설명 준비 중")
+
+
+def test_translations_require_all_nine_languages():
+    full = [{"lang": lang, "text": "t"} for lang in TARGET_LANGS]
+    assert len(Translations(reason="ok", items=full).items) == 9
+    with pytest.raises(ValidationError):
+        Translations(reason="ok", items=full[:8])  # 언어 누락
+    with pytest.raises(ValidationError):
+        Translations(reason="ok", items=full + [{"lang": "fr", "text": "t"}])  # 목록 밖 언어
+
+
+def test_translations_reject_blank_text():
+    items = [{"lang": lang, "text": "t"} for lang in TARGET_LANGS[:-1]]
+    items.append({"lang": TARGET_LANGS[-1], "text": "  "})
+    with pytest.raises(ValidationError):
+        Translations(reason="ok", items=items)
+
+
+def test_valid_substances_drops_zero_percent():
+    # 스프링은 0% 항목을 저장 전에 걸렀다(RiskLevel 은 1~100만 허용) — 동일하게 제거한다.
+    items = [
+        {"code": "PORK", "inclusionPercent": 95},
+        {"code": "ONION", "inclusionPercent": 0},
     ]
     assert valid_substances(items) == [{"code": "PORK", "inclusionPercent": 95}]
 

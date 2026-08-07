@@ -71,14 +71,23 @@ def _plausible(corrected: str, original: str) -> bool:
     return difflib.SequenceMatcher(None, _jamo(corrected), _jamo(base)).ratio() >= 0.5
 
 
+# 정제된 이름의 길이 상한(공백 포함) — 콘텐츠 정책. 프롬프트 지시와 함께 코드로도 강제한다.
+MAX_NAME_LENGTH = 20
+
+
 async def clean_one(name: str, anchors: list[str], normalize: Normalizer) -> dict:
     snapped = snap(name, anchors)
     if snapped is not None:
         return {"original": name, "name": snapped, "method": "snap", "reason": ""}
     fix = await normalize(name)
     corrected = fix.corrected.strip()
-    if not corrected or corrected == name or not _plausible(corrected, name):
-        # 빈 출력·변경 없음·원본과 동떨어진 출력은 원본을 유지해 삭제나 과교정을 막는다.
+    if (
+        not corrected
+        or corrected == name
+        or len(corrected) > MAX_NAME_LENGTH
+        or not _plausible(corrected, name)
+    ):
+        # 빈 출력·변경 없음·길이 초과·원본과 동떨어진 출력은 원본을 유지해 삭제나 과교정을 막는다.
         return {"original": name, "name": name, "method": "unchanged", "reason": fix.reason}
     return {"original": name, "name": corrected, "method": "llm", "reason": fix.reason}
 
@@ -112,6 +121,8 @@ NAMEFIX_TEMPLATE = """당신은 메뉴판 OCR로 수집된 한국 음식 이름�
 - 다른 음식으로 바꾸거나 새 이름을 짓지 마세요
 - 수식어를 지우지 마세요 ("할매손맛 김치찌개"의 "할매손맛"은 이름의 일부입니다)
 - 확신이 없으면 원본을 그대로 반환하세요. 원본 유지가 잘못된 교정보다 낫습니다.
+
+정제된 이름은 공백 포함 20자 이내여야 합니다.
 
 이름: {{name}}
 
