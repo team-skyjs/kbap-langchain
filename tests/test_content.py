@@ -13,6 +13,7 @@ from kbap.content import (
     JudgeVerdict,
     Translations,
     build_content_graph,
+    build_ingest_payload,
     process_event,
     valid_substances,
 )
@@ -113,6 +114,7 @@ async def test_low_ingredient_score_fails_even_if_judge_passes():
     assert state["verdict"].passed is False
     assert state["verdict"].rejected_fields == ["avoidance"]
     assert "임계값" in state["verdict"].reason
+    assert state["verdict"].failure_kind == "INGREDIENT_GUARD"
 
 
 async def test_non_food_ends_graph_without_generation():
@@ -126,6 +128,7 @@ async def test_non_food_ends_graph_without_generation():
 
     assert state["verdict"].passed is False
     assert "부적합" in state["verdict"].reason
+    assert state["verdict"].failure_kind == "NOT_FOOD"
     assert rec["gen_nt"] == []
     assert rec["generate_description"] == []
     assert rec["generate_ingredients"] == []
@@ -175,6 +178,8 @@ async def test_retry_exhausted_flows_failure_to_judge():
     assert judged["description_score"].score == 40
     assert judged["description_feedback"] == "설명 40"
     assert state["verdict"].passed is False
+    # LLM judge 가 failure_kind 를 안 채워도(테스트 fns 처럼) 노드 코드가 확정적으로 찍는다.
+    assert state["verdict"].failure_kind == "JUDGE_REJECTED"
 
 
 async def test_independent_branches_do_not_retry_each_other():
@@ -184,6 +189,49 @@ async def test_independent_branches_do_not_retry_each_other():
     assert len(rec["generate_ingredients"]) == 2
     assert len(rec["generate_description"]) == 1
     assert len(rec["gen_nt"]) == 1
+
+
+# ===== kbap 적재 페이로드 =====
+# 계약: agenthub wiki/langchain-food-ingest-contract.md
+
+
+def test_ingest_payload_passed_maps_contract_fields():
+    state = {
+        "food_name": "김치찌게 8,000원",
+        "cleaned_name": "김치찌개",
+        "description": "돼지고기와 김치를 끓인 찌개",
+        "name_translations": {"en": "Kimchi Stew"},
+        "description_translations": {"en": "A stew"},
+        "ingredients": {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3},
+        "verdict": JudgeVerdict(reason="ok", passed=True),
+    }
+
+    assert build_ingest_payload(state) == {
+        "displayName": "김치찌개",  # 스캔 원본이 아닌 정제된 이름
+        "passed": True,
+        "description": "돼지고기와 김치를 끓인 찌개",
+        "spiciness": 3,
+        "nameTranslations": {"en": "Kimchi Stew"},
+        "descriptionTranslations": {"en": "A stew"},
+        "ingredients": [{"code": "PORK", "inclusion_percent": 95}],  # 계약 키는 snake_case
+    }
+
+
+def test_ingest_payload_failed_sends_kind_and_reason_only():
+    state = {
+        "food_name": "사리 추가",
+        "cleaned_name": "사리 추가",
+        "verdict": JudgeVerdict(
+            reason="콘텐츠 생성 부적합: 옵션 항목", passed=False, failure_kind="NOT_FOOD"
+        ),
+    }
+
+    assert build_ingest_payload(state) == {
+        "displayName": "사리 추가",
+        "passed": False,
+        "failureKind": "NOT_FOOD",
+        "reason": "콘텐츠 생성 부적합: 옵션 항목",
+    }
 
 
 # ===== 기피성분 후보 필터 =====

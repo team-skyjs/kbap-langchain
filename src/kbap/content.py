@@ -52,6 +52,9 @@ class JudgeVerdict(BaseModel):
     reason: str
     passed: bool
     rejected_fields: list[str] = []
+    # kbap 적재 계약의 failureKind — LLM 출력이 아니라 세 생성 지점의 코드가 찍는다.
+    # (정제 조기 종료→NOT_FOOD, 기피성분 가드→INGREDIENT_GUARD, 그 외 judge 탈락→JUDGE_REJECTED)
+    failure_kind: str | None = None
 
 
 class ContentFns(NamedTuple):
@@ -97,7 +100,9 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
         out: ContentState = {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
         if fix.get("method") == "rejected":
             reason = fix.get("reason", "") or "음식 메뉴명이 아님"
-            out["verdict"] = JudgeVerdict(passed=False, reason=f"콘텐츠 생성 부적합: {reason}")
+            out["verdict"] = JudgeVerdict(
+                passed=False, reason=f"콘텐츠 생성 부적합: {reason}", failure_kind="NOT_FOOD"
+            )
         return out
 
     # 부적합 판정이면 곧장 END, 아니면 3개 분기로 팬아웃한다
@@ -148,6 +153,9 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     # 없고, 알레르기 데이터는 오통과가 누락보다 위험하다(valid_substances 필터와 같은 철학).
     async def judge(state: ContentState):
         verdict = await fns.judge(dict(state))
+        if not verdict.passed:
+            # LLM 출력의 failure_kind 는 신뢰하지 않고 덮어쓴다 — 계약 밖 enum 값 차단.
+            verdict = verdict.model_copy(update={"failure_kind": "JUDGE_REJECTED"})
         ingredient = state["ingredient_score"]
         if verdict.passed and ingredient.score < thresholds.avoidance:
             verdict = JudgeVerdict(
@@ -155,6 +163,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
                 reason=f"기피성분 {ingredient.score}점 < 임계값 {thresholds.avoidance}: "
                 f"{ingredient.reason}",
                 rejected_fields=["avoidance"],
+                failure_kind="INGREDIENT_GUARD",
             )
         return {"verdict": verdict}
 
@@ -516,6 +525,35 @@ def _cached_graph():
     if _graph is None:
         _graph = load_graph()
     return _graph
+
+
+def build_ingest_payload(state: dict) -> dict:
+    """그래프 최종 상태 → kbap 적재 계약 요청 본문 (agenthub wiki/langchain-food-ingest-contract.md).
+
+    displayName 은 스캔 원본이 아닌 정제된 이름이다 — 콘텐츠가 그 이름 기준으로
+    생성됐고, 스캔 노이즈("김치찌게 8,000원")가 DB 행 이름이 되면 안 된다.
+    """
+    verdict = state["verdict"]
+    if not verdict.passed:
+        return {
+            "displayName": state["cleaned_name"],
+            "passed": False,
+            "failureKind": verdict.failure_kind,
+            "reason": verdict.reason,
+        }
+    ingredients = state["ingredients"]
+    return {
+        "displayName": state["cleaned_name"],
+        "passed": True,
+        "description": state["description"],
+        "spiciness": ingredients["spiciness"],
+        "nameTranslations": state["name_translations"],
+        "descriptionTranslations": state["description_translations"],
+        "ingredients": [
+            {"code": i["code"], "inclusion_percent": i["inclusionPercent"]}
+            for i in ingredients["substances"]
+        ],
+    }
 
 
 async def process_event(event: dict, graph, concurrency: int, callbacks: list = []) -> list[str]:
