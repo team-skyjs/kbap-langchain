@@ -4,6 +4,9 @@
 생성까지 kbap.content 그래프로 전량 이관되면 이 배치는 은퇴하고, 채점 프롬프트·판정
 로직은 content 그래프의 검수 노드가 이미 재사용하고 있다."""
 
+# Lambda 런타임은 3.12(어노테이션 즉시 평가) — Verdict 등 전방 참조가 임포트에서 죽는다.
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple, TypedDict
 import asyncio
