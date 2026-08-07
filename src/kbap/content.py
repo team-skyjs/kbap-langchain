@@ -414,27 +414,39 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
 
 log = logging.getLogger("kbap.content")
 
+
+def load_graph(config_path: str | None = None):
+    """config.yaml 하나로 콘텐츠 그래프를 한 번에 조립하는 원샷 팩토리.
+
+    노트북·스크립트·Lambda 가 전부 이 함수를 쓴다:
+        from kbap.content import load_graph
+        graph = load_graph()          # 루트에서
+        graph = load_graph("../config.yaml")  # notebooks/ 에서
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    with open(config_path or os.environ.get("CONFIG_PATH", "config.yaml")) as f:
+        raw = yaml.safe_load(f)
+    llm = raw["llm"]
+    thresholds = Thresholds(**raw["thresholds"])
+    fns = make_fns(
+        llm["model"],
+        llm.get("timeout_seconds", 120),
+        thresholds,
+        judge_model=llm.get("judge_model"),
+    )
+    return build_content_graph(fns, thresholds)
+
+
 _graph = None
 
 
-def _load_graph():
-    """콜드 스타트 시 그래프를 한 번만 만든다."""
+def _cached_graph():
+    """Lambda 콜드 스타트 시 그래프를 한 번만 만든다."""
     global _graph
     if _graph is None:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-        with open(os.environ.get("CONFIG_PATH", "config.yaml")) as f:
-            raw = yaml.safe_load(f)
-        llm = raw["llm"]
-        thresholds = Thresholds(**raw["thresholds"])
-        fns = make_fns(
-            llm["model"],
-            llm.get("timeout_seconds", 120),
-            thresholds,
-            judge_model=llm.get("judge_model"),
-        )
-        _graph = build_content_graph(fns, thresholds)
+        _graph = load_graph()
     return _graph
 
 
@@ -468,7 +480,7 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
 
 
 def handler(event, context):
-    graph = _load_graph()
+    graph = _cached_graph()
     concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
     failed = asyncio.run(process_event(event, graph, concurrency, make_callbacks()))
 

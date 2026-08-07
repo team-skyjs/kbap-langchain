@@ -19,7 +19,7 @@ import os
 
 import yaml
 
-from kbap.content import handler  # noqa: F401 — Lambda 진입점으로 다시 내보냄
+from kbap.content import handler, load_graph  # noqa: F401 — Lambda 진입점·그래프 팩토리 재노출
 
 log = logging.getLogger("kbap")
 
