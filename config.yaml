@@ -1,13 +1,14 @@
 kbap_api:
-  # 호스트까지만 적는다 — /api/v1/admin/... 경로는 클라이언트가 붙인다.
+  # 호스트까지만 입력한다. /api/v1/admin/... 경로는 클라이언트가 붙인다.
   base_url: https://dev.kbap.site # 인증: KBAP_API_TOKEN 환경변수
 llm:
-  # "provider:model" 이면 그 벤더를, 접두사 없이 gemini* 면 google_genai 를 쓴다.
+  # "provider:model" 형식이면 해당 제공자를, 접두사 없는 gemini*는 google_genai를 사용한다.
   # 교체 예시: gemini-2.5-flash / openai:gpt-5-nano / openai:gpt-5-mini
   model: openai:gpt-5-mini # 기본 채점 모델
-  avoidance_model: openai:gpt-5-mini # 안전 직결 노드 — kbap KB-236 에서 nano 가 후보 밖 코드를 흘린 전례가 있어 mini 유지
-  timeout_seconds: 120 # LLM 콜 타임아웃. 모델이 느려지면 이 값을 조정
-thresholds: # 필드군별 통과 임계값 — 운영하며 튜닝
+  avoidance_model: openai:gpt-5-mini # 안전 관련 노드 — 과거 소형 모델이 후보 밖 코드를 반환한 사례가 있어 mini 유지
+  # judge_model: openai:gpt-5-mini # 콘텐츠 그래프 종합판정 — 미설정 시 model 사용
+  timeout_seconds: 120 # LLM 호출 타임아웃. 모델이 느려지면 이 값을 조정
+thresholds: # 필드군별 통과 임계값 — 운영 중 조정
   description: 70
   translations: 60
   avoidance: 70
