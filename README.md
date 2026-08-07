@@ -29,11 +29,12 @@ flowchart TD
 ## 구조
 
 ```
-main.py            # 단일 진입점 — CLI 서브커맨드, Lambda 는 main.handler
 src/kbap/
+  main.py          # 단일 진입점 — uv run kbap <cmd>, Lambda 는 kbap.main.handler
   content.py       # 본체: 콘텐츠 그래프 + 생성/검수 노드 + SQS 핸들러
   review.py        # 과도기: 스프링이 생성한 콘텐츠의 검수 전용 배치 (이관 완료 시 은퇴)
   namefix.py       # 이름 정제 — 파이프라인 첫 단계, content 가 재사용
+  prompts.py       # 프롬프트 템플릿 전부 (소스는 Langfuse, 여기는 폴백)
 notebooks/content_pipeline.ipynb   # 그래프 시각화·단건 실행
 ```
 
@@ -43,8 +44,8 @@ notebooks/content_pipeline.ipynb   # 그래프 시각화·단건 실행
 uv sync
 cp .env.example .env               # LLM·Langfuse·kbap 키
 
-uv run python main.py review --dry-run --limit 5      # 검수 배치 (과도기)
-uv run python main.py namefix --input names.json      # 이름 정제만 (디버깅)
+uv run kbap review --dry-run --limit 5      # 검수 배치 (과도기)
+uv run kbap namefix --input names.json      # 이름 정제만 (디버깅)
 uv run jupyter lab                                    # 콘텐츠 그래프 전체 실행
 uv run pytest
 ```

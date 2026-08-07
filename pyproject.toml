@@ -15,6 +15,9 @@ dependencies = [
     "langchain-openai>=1.4.1",
 ]
 
+[project.scripts]
+kbap = "kbap.main:main"
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
