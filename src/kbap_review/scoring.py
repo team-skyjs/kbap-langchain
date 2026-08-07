@@ -156,28 +156,30 @@ def lang_scores(result: TranslationScores) -> dict[str, FieldScore]:
     return scores
 
 
-def make_scorers(config):
-    """실 LLM 기반 스코어러. import를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
+def init_model(name: str, timeout: int):
+    """모델명 문자열로 chat model 생성. import를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다.
+
+    "gemini-*"는 자동 추론이 안 되는 버전이 있어 provider를 명시한다.
+    gpt-* 등 타 벤더로 바꾸면 "openai:gpt-5-mini"처럼 "provider:model" 형식으로 설정.
+    timeout 미설정 시 SDK 기본값을 쓰는데, 무인 배치에서 한 콜이 멈추면 그
+    세마포어 슬롯을 영원히 붙잡아 gather 전체가 멎는다 — 반드시 설정한다.
+    """
     from langchain.chat_models import init_chat_model
 
+    if ":" in name:
+        provider, model = name.split(":", 1)
+        return init_chat_model(model, model_provider=provider, timeout=timeout)
+    if name.startswith("gemini"):
+        return init_chat_model(name, model_provider="google_genai", timeout=timeout)
+    return init_chat_model(name, timeout=timeout)
+
+
+def make_scorers(config):
+    """실 LLM 기반 스코어러."""
     from kbap_review.graph import Scorers
 
-    def _model(name: str):
-        # "gemini-*"는 자동 추론이 안 되는 버전이 있어 provider를 명시한다.
-        # gpt-* 등 타 벤더로 바꾸면 "openai:gpt-5-mini"처럼 "provider:model" 형식으로 설정.
-        # timeout 미설정 시 SDK 기본값을 쓰는데, 무인 배치에서 한 콜이 멈추면 그
-        # 세마포어 슬롯을 영원히 붙잡아 gather 전체가 멎는다 — 반드시 설정한다.
-        if ":" in name:
-            provider, model = name.split(":", 1)
-            return init_chat_model(model, model_provider=provider, timeout=config.timeout_seconds)
-        if name.startswith("gemini"):
-            return init_chat_model(
-                name, model_provider="google_genai", timeout=config.timeout_seconds
-            )
-        return init_chat_model(name, timeout=config.timeout_seconds)
-
-    base = _model(config.model)
-    avoid = _model(config.avoidance_model)
+    base = init_model(config.model, config.timeout_seconds)
+    avoid = init_model(config.avoidance_model, config.timeout_seconds)
     desc_llm = base.with_structured_output(FieldScore)
     trans_llm = base.with_structured_output(TranslationScores)
     avoid_llm = avoid.with_structured_output(FieldScore)
