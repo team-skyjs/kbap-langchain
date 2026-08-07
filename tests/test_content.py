@@ -24,9 +24,9 @@ TH = Thresholds(description=70, translations=70, avoidance=70)
 # ===== 그래프 배선·재시도 =====
 
 
-def build_fns(rec, nt_seq=(90,), desc_seq=(90,), avoid_seq=(90,)):
+def build_fns(rec, nt_seq=(90,), desc_seq=(90,), ingredient_seq=(90,)):
     """호출 기록(rec)과 검수 점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
-    nt_scores, desc_scores, avoid_scores = list(nt_seq), list(desc_seq), list(avoid_seq)
+    nt_scores, desc_scores, ingredient_scores = list(nt_seq), list(desc_seq), list(ingredient_seq)
 
     async def clean_name(name):
         rec["clean"].append(name)
@@ -44,8 +44,8 @@ def build_fns(rec, nt_seq=(90,), desc_seq=(90,), avoid_seq=(90,)):
         rec["gen_desc_tr"].append((name, desc))
         return {"en": "A stew of pork and kimchi."}
 
-    async def gen_avoid(name, feedback):
-        rec["gen_avoid"].append((name, feedback))
+    async def gen_ingredients(name, feedback):
+        rec["gen_ingredients"].append((name, feedback))
         return {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3}
 
     async def rev_name_tr(name, translations):
@@ -56,13 +56,13 @@ def build_fns(rec, nt_seq=(90,), desc_seq=(90,), avoid_seq=(90,)):
         score = desc_scores.pop(0)
         return FieldScore(score=score, reason=f"설명 {score}")
 
-    async def rev_avoid(name, avoidance):
-        score = avoid_scores.pop(0)
+    async def rev_ingredients(name, ingredients):
+        score = ingredient_scores.pop(0)
         return FieldScore(score=score, reason=f"기피 {score}")
 
     async def judge(state):
         rec["judge"].append(state)
-        scores = [state["nt_score"], state["desc_score"], state["avoid_score"]]
+        scores = [state["nt_score"], state["desc_score"], state["ingredient_score"]]
         passed = all(s.score >= 70 for s in scores)
         return JudgeVerdict(reason="종합", passed=passed, rejected_fields=[])
 
@@ -71,10 +71,10 @@ def build_fns(rec, nt_seq=(90,), desc_seq=(90,), avoid_seq=(90,)):
         gen_name_tr=gen_name_tr,
         gen_desc=gen_desc,
         gen_desc_tr=gen_desc_tr,
-        gen_avoid=gen_avoid,
+        gen_ingredients=gen_ingredients,
         rev_name_tr=rev_name_tr,
         rev_desc=rev_desc,
-        rev_avoid=rev_avoid,
+        rev_ingredients=rev_ingredients,
         judge=judge,
     )
 
@@ -92,7 +92,7 @@ async def test_happy_path_populates_all_content():
     assert state["name_translations"] == {"en": "Kimchi Stew"}
     assert state["description"].startswith("돼지고기")
     assert state["description_translations"]["en"].startswith("A stew")
-    assert state["avoidance"]["spiciness"] == 3
+    assert state["ingredients"]["spiciness"] == 3
     assert state["verdict"].passed is True
     # 생성은 각각 한 번, 종합 판정은 join 후 정확히 한 번 실행한다
     assert len(rec["gen_desc"]) == 1
@@ -105,7 +105,7 @@ async def test_generators_receive_cleaned_name():
     # 생성 단계에는 원본("김치찌게 8,000원")이 아닌 정제된 이름을 전달해야 한다.
     assert rec["gen_nt"][0][0] == "김치찌개"
     assert rec["gen_desc"][0][0] == "김치찌개"
-    assert rec["gen_avoid"][0][0] == "김치찌개"
+    assert rec["gen_ingredients"][0][0] == "김치찌개"
 
 
 async def test_review_fail_retries_generation_once_with_feedback():
@@ -138,9 +138,9 @@ async def test_retry_exhausted_flows_failure_to_judge():
 
 async def test_independent_branches_do_not_retry_each_other():
     rec = defaultdict(list)
-    await run(rec, avoid_seq=(30, 90))
+    await run(rec, ingredient_seq=(30, 90))
 
-    assert len(rec["gen_avoid"]) == 2
+    assert len(rec["gen_ingredients"]) == 2
     assert len(rec["gen_desc"]) == 1
     assert len(rec["gen_nt"]) == 1
 

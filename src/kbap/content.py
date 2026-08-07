@@ -25,7 +25,7 @@ from langgraph.types import RetryPolicy
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from kbap.prompts import (
-    AVOID_GEN_TEMPLATE,
+    INGREDIENTS_GEN_TEMPLATE,
     DESC_REVIEW_TEMPLATE,
     DESC_TEMPLATE,
     DESC_TR_TEMPLATE,
@@ -58,10 +58,10 @@ class ContentFns(NamedTuple):
     gen_name_tr: Callable[[str, str], Awaitable[dict]]
     gen_desc: Callable[[str, str], Awaitable[str]]
     gen_desc_tr: Callable[[str, str], Awaitable[dict]]
-    gen_avoid: Callable[[str, str], Awaitable[dict]]
+    gen_ingredients: Callable[[str, str], Awaitable[dict]]
     rev_name_tr: Callable[[str, dict], Awaitable[FieldScore]]
     rev_desc: Callable[[str, str, dict], Awaitable[FieldScore]]
-    rev_avoid: Callable[[str, dict], Awaitable[FieldScore]]
+    rev_ingredients: Callable[[str, dict], Awaitable[FieldScore]]
     judge: Callable[[dict], Awaitable[JudgeVerdict]]
 
 
@@ -78,10 +78,10 @@ class ContentState(TypedDict, total=False):
     desc_score: FieldScore
     desc_attempts: int
     desc_feedback: str
-    avoidance: dict
-    avoid_score: FieldScore
-    avoid_attempts: int
-    avoid_feedback: str
+    ingredients: dict
+    ingredient_score: FieldScore
+    ingredient_attempts: int
+    ingredient_feedback: str
     verdict: JudgeVerdict
 
 
@@ -121,14 +121,14 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
         return {"desc_score": score, "desc_feedback": score.reason}
 
     # ④ 기피성분·매운맛 생성(분기 3) — 81종 후보에서 선택하고 후보 밖 코드는 저장 전에 거른다
-    async def gen_avoid(state: ContentState):
-        avoid = await fns.gen_avoid(state["cleaned_name"], state.get("avoid_feedback", ""))
-        return {"avoidance": avoid, "avoid_attempts": state.get("avoid_attempts", 0) + 1}
+    async def gen_ingredients(state: ContentState):
+        ing = await fns.gen_ingredients(state["cleaned_name"], state.get("ingredient_feedback", ""))
+        return {"ingredients": ing, "ingredient_attempts": state.get("ingredient_attempts", 0) + 1}
 
     # 기피성분·매운맛 검수 — 안전과 직결된 주요 성분 누락을 최우선으로 감점한다
-    async def rev_avoid(state: ContentState):
-        score = await fns.rev_avoid(state["cleaned_name"], state["avoidance"])
-        return {"avoid_score": score, "avoid_feedback": score.reason}
+    async def rev_ingredients(state: ContentState):
+        score = await fns.rev_ingredients(state["cleaned_name"], state["ingredients"])
+        return {"ingredient_score": score, "ingredient_feedback": score.reason}
 
     # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다
     async def judge(state: ContentState):
@@ -152,19 +152,19 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_node("gen_desc", gen_desc, retry_policy=retry)
     g.add_node("gen_desc_tr", gen_desc_tr, retry_policy=retry)
     g.add_node("rev_desc", rev_desc, retry_policy=retry)
-    g.add_node("gen_avoid", gen_avoid, retry_policy=retry)
-    g.add_node("rev_avoid", rev_avoid, retry_policy=retry)
+    g.add_node("gen_ingredients", gen_ingredients, retry_policy=retry)
+    g.add_node("rev_ingredients", rev_ingredients, retry_policy=retry)
     # defer=True — 세 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다.
     g.add_node("judge", judge, defer=True, retry_policy=retry)
 
     g.add_edge(START, "clean_name")
     g.add_edge("clean_name", "gen_name_tr")
     g.add_edge("clean_name", "gen_desc")
-    g.add_edge("clean_name", "gen_avoid")
+    g.add_edge("clean_name", "gen_ingredients")
     g.add_edge("gen_name_tr", "rev_name_tr")
     g.add_edge("gen_desc", "gen_desc_tr")  # 설명을 재생성하면 번역도 함께 다시 만든다
     g.add_edge("gen_desc_tr", "rev_desc")
-    g.add_edge("gen_avoid", "rev_avoid")
+    g.add_edge("gen_ingredients", "rev_ingredients")
     g.add_conditional_edges(
         "rev_name_tr",
         _route("nt_score", "nt_attempts", thresholds.translations, "gen_name_tr"),
@@ -176,9 +176,9 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
         ["gen_desc", "judge"],
     )
     g.add_conditional_edges(
-        "rev_avoid",
-        _route("avoid_score", "avoid_attempts", thresholds.avoidance, "gen_avoid"),
-        ["gen_avoid", "judge"],
+        "rev_ingredients",
+        _route("ingredient_score", "ingredient_attempts", thresholds.avoidance, "gen_ingredients"),
+        ["gen_ingredients", "judge"],
     )
     g.add_edge("judge", END)
     return g.compile()
@@ -215,14 +215,14 @@ class Translations(BaseModel):
         return self
 
 
-class AvoidanceItem(BaseModel):
+class IngredientItem(BaseModel):
     code: str
     inclusionPercent: int = Field(ge=0, le=100)
 
 
-class AvoidanceGen(BaseModel):
+class IngredientsGen(BaseModel):
     reason: str
-    items: list[AvoidanceItem]
+    items: list[IngredientItem]
     spiciness: int = Field(ge=0, le=10)
 
 
@@ -291,10 +291,10 @@ def desc_tr_prompt(name: str, description: str) -> str:
     )
 
 
-def avoid_gen_prompt(name: str, feedback: str) -> str:
+def ingredients_gen_prompt(name: str, feedback: str) -> str:
     return render_prompt(
         "food-ingredients",
-        AVOID_GEN_TEMPLATE,
+        INGREDIENTS_GEN_TEMPLATE,
         name=name,
         candidate_codes=AVOIDANCE_CODES,
         feedback_block=_feedback_block(feedback),
@@ -327,7 +327,7 @@ def judge_prompt(state: dict, thresholds) -> str:
     scores = {
         "이름 번역": (state["nt_score"], thresholds.translations),
         "설명·설명 번역": (state["desc_score"], thresholds.description),
-        "기피성분·매운맛": (state["avoid_score"], thresholds.avoidance),
+        "기피성분·매운맛": (state["ingredient_score"], thresholds.avoidance),
     }
     # 조건·반복이 있는 부분은 코드에서 미리 계산해 변수로 넣는다 — Langfuse 템플릿엔 로직이 없다.
     lines = "\n".join(
@@ -368,7 +368,7 @@ def make_fns(
     judge_llm = _bind(init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict))
     tr_llm = _bind(gen_base.with_structured_output(Translations))
     desc_llm = _bind(gen_base.with_structured_output(DescGen))
-    avoid_llm = _bind(base.with_structured_output(AvoidanceGen))
+    ingredients_llm = _bind(base.with_structured_output(IngredientsGen))
     score_llm = _bind(base.with_structured_output(FieldScore))
     tr_score_llm = _bind(base.with_structured_output(TranslationScores))
     normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
@@ -389,10 +389,10 @@ def make_fns(
         result: Translations = await tr_llm.ainvoke(desc_tr_prompt(name, description))
         return {i.lang: i.text for i in result.items}
 
-    async def gen_avoid(name: str, feedback: str) -> dict:
+    async def gen_ingredients(name: str, feedback: str) -> dict:
         # ponytail: 단일 모델 — kbap은 여러 모델의 fan-out 결과를 minAgreement(2)로 종합한다.
         # 안전 데이터의 정확도가 부족하면 해당 합의 구조나 web_search 도구를 이식한다.
-        result: AvoidanceGen = await avoid_llm.ainvoke(avoid_gen_prompt(name, feedback))
+        result: IngredientsGen = await ingredients_llm.ainvoke(ingredients_gen_prompt(name, feedback))
         return {
             "substances": valid_substances([i.model_dump() for i in result.items]),
             "spiciness": result.spiciness,
@@ -416,11 +416,11 @@ def make_fns(
     async def rev_desc(name: str, description: str, translations: dict) -> FieldScore:
         return await score_llm.ainvoke(desc_review_prompt(name, description, translations))
 
-    async def rev_avoid(name: str, avoidance: dict) -> FieldScore:
+    async def rev_ingredients(name: str, ingredients: dict) -> FieldScore:
         food = {
             "koreanName": name,
-            "avoidanceSubstances": avoidance["substances"],
-            "spiciness": avoidance["spiciness"],
+            "avoidanceSubstances": ingredients["substances"],
+            "spiciness": ingredients["spiciness"],
         }
         return await score_llm.ainvoke(avoidance_prompt(food))
 
@@ -432,10 +432,10 @@ def make_fns(
         gen_name_tr=gen_name_tr,
         gen_desc=gen_desc,
         gen_desc_tr=gen_desc_tr,
-        gen_avoid=gen_avoid,
+        gen_ingredients=gen_ingredients,
         rev_name_tr=rev_name_tr,
         rev_desc=rev_desc,
-        rev_avoid=rev_avoid,
+        rev_ingredients=rev_ingredients,
         judge=judge,
     )
 

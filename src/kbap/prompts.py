@@ -95,7 +95,7 @@ items: 설명을 9개 언어로 실제 번역한 값 (템플릿 문구·원문 �
   en "Round fried dough balls filled with cheese.", ja "チーズを入れた生地を丸く揚げたサイドメニュー。",
   zh-Hans "面团包入芝士后炸成圆球的小吃。\""""
 
-AVOID_GEN_TEMPLATE = """너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
+INGREDIENTS_GEN_TEMPLATE = """너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
 기피성분의 포함 확률을 1~100 정수로 매기고, 음식의 맵기를 0~10 정수로 판정하라.
 음식명: "{{name}}"
 
@@ -293,7 +293,7 @@ PROMPTS = {
     "food-name-translation": NAME_TR_TEMPLATE,
     "food-description": DESC_TEMPLATE,
     "food-description-translation": DESC_TR_TEMPLATE,
-    "food-ingredients": AVOID_GEN_TEMPLATE,
+    "food-ingredients": INGREDIENTS_GEN_TEMPLATE,
     "food-name-translation-review": NAME_TR_REVIEW_TEMPLATE,
     "food-description-review": DESC_REVIEW_TEMPLATE,
     "food-judge": JUDGE_TEMPLATE,
