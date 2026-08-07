@@ -8,13 +8,23 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 
 import yaml
+from dotenv import load_dotenv
 
 from kbap_namefix.pipeline import clean_batch, make_normalizer
 from kbap_review.__main__ import make_callbacks
 
 log = logging.getLogger("kbap_namefix")
+
+
+def _load_names(path: str, parser: argparse.ArgumentParser) -> list[str]:
+    with open(path) as f:
+        names = json.load(f)
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        parser.error(f"{path}: 문자열 배열 JSON 이어야 합니다")
+    return names
 
 
 async def main() -> None:
@@ -27,23 +37,25 @@ async def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    # LLM API 키 로드 — kbap_review.config.load_config 와 같은 환경 경계(override=False).
+    load_dotenv()
     with open(args.config) as f:
         raw = yaml.safe_load(f)
     llm = raw["llm"]
+    concurrency = raw["concurrency"]
+    if concurrency < 1:
+        # Semaphore(0) 은 모든 코루틴을 영구히 막아 배치가 조용히 멈춘다.
+        parser.error("concurrency 는 1 이상이어야 합니다")
 
-    with open(args.input) as f:
-        names = json.load(f)
-    anchors: list[str] = []
-    if args.anchors:
-        with open(args.anchors) as f:
-            anchors = json.load(f)
+    names = _load_names(args.input, parser)
+    anchors = _load_names(args.anchors, parser) if args.anchors else []
 
     normalize = make_normalizer(
         llm.get("namefix_model", llm["model"]),
         llm.get("timeout_seconds", 120),
         make_callbacks(),
     )
-    results = await clean_batch(names, anchors, normalize, raw["concurrency"])
+    results = await clean_batch(names, anchors, normalize, concurrency)
 
     counts: dict[str, int] = {}
     for r in results:
@@ -51,8 +63,11 @@ async def main() -> None:
         if r["method"] != "unchanged":
             log.info("%s %r -> %r %s", r["method"], r["original"], r["name"], r["reason"])
 
-    with open(args.output, "w") as f:
+    # 임시 파일에 쓴 뒤 원자적 교체 — 중단돼도 깨진 JSON 이나 유실된 이전 결과를 남기지 않는다.
+    tmp = args.output + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, args.output)
     log.info("완료: %s -> %s", counts, args.output)
 
 

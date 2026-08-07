@@ -23,6 +23,21 @@ def test_snap_empty_anchors():
     assert snap("김치찌개", []) is None
 
 
+def test_snap_preserves_modifier():
+    # "왕김치찌개"는 오타가 아니라 수식어가 붙은 다른 이름 — 스냅으로 지우면 안 된다.
+    assert snap("왕김치찌개", ANCHORS) is None
+
+
+def test_snap_rejects_different_dish():
+    # 찜 vs 찌개는 다른 요리. 공유 접두어("돼지고기 김치")가 길어도 스냅 금지.
+    assert snap("돼지고기 김치찜", ["돼지고기 김치찌개"]) is None
+
+
+def test_snap_ambiguous_tie_rejected():
+    # 두 앵커와 같은 거리면 어느 쪽인지 모른다 — 앵커 순서에 따라 결과가 뒤집히면 안 된다.
+    assert snap("김치찌갸", ["김치찌개", "김치찌게"]) is None
+
+
 # --- clean_one: 스냅 → LLM 폴백 판정 ---
 
 
@@ -50,6 +65,13 @@ async def test_clean_one_llm_correction():
 
 async def test_clean_one_llm_no_change():
     result = await clean_one("할매손맛 김치찌개", [], make_normalizer("할매손맛 김치찌개"))
+    assert result["name"] == "할매손맛 김치찌개"
+    assert result["method"] == "unchanged"
+
+
+async def test_clean_one_llm_wholesale_rename_rejected():
+    # 프롬프트가 뚫려 모델이 전혀 다른 이름을 내놔도 결정적 가드가 막는다.
+    result = await clean_one("할매손맛 김치찌개", [], make_normalizer("마라탕"))
     assert result["name"] == "할매손맛 김치찌개"
     assert result["method"] == "unchanged"
 

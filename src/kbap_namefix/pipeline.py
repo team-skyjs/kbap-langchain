@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import re
 import unicodedata
 from collections.abc import Awaitable, Callable
 
@@ -19,33 +20,59 @@ def _jamo(s: str) -> str:
     return unicodedata.normalize("NFD", s)
 
 
-def snap(name: str, anchors: list[str], threshold: float = 0.85) -> str | None:
-    """자모 편집거리로 앵커(기수집 확정 음식명)에 스냅. 못 미치면 None — 억지 스냅 금지."""
+def _jamo_edits(a: str, b: str) -> int:
+    """자모 삽입+삭제 수. 치환 1자모 = 삭제+삽입 = 2."""
+    matches = sum(bl.size for bl in difflib.SequenceMatcher(None, a, b).get_matching_blocks())
+    return len(a) + len(b) - 2 * matches
+
+
+def snap(name: str, anchors: list[str], max_edits: int = 2) -> str | None:
+    """자모 편집 수로 앵커(기수집 확정 음식명)에 스냅. 예산 초과·동률이면 None.
+
+    비율(ratio)이 아니라 절대 편집 수를 쓴다 — 비율 기준은 공유 접두어가 길면
+    "왕김치찌개"→"김치찌개"(수식어 삭제), "돼지고기 김치찜"→"돼지고기 김치찌개"(다른 요리)
+    까지 통과시킨다. OCR 오타는 길이와 무관하게 1~2자모라 예산 2가 정확히 가른다.
+    """
     if name in anchors:
         return name
     # ponytail: difflib 선형 스캔 — 앵커 수만 건 이상이면 rapidfuzz 로 교체
     j = _jamo(name)
-    best, best_ratio = None, threshold
+    best, best_edits, tied = None, 0, False
     for anchor in anchors:
-        ratio = difflib.SequenceMatcher(None, j, _jamo(anchor)).ratio()
-        if ratio >= best_ratio:
-            best, best_ratio = anchor, ratio
-    return best
+        edits = _jamo_edits(j, _jamo(anchor))
+        if edits > max_edits:
+            continue
+        if best is None or edits < best_edits:
+            best, best_edits, tied = anchor, edits, False
+        elif edits == best_edits:
+            tied = True  # 어느 앵커인지 모른다 — 앵커 순서로 결과가 뒤집히면 안 된다
+    return None if tied else best
 
 
 Normalizer = Callable[[str], Awaitable[NameFix]]
 
+_NON_HANGUL = re.compile(r"[^가-힣 ]")
 
-async def clean_one(
-    name: str, anchors: list[str], normalize: Normalizer, threshold: float = 0.85
-) -> dict:
-    snapped = snap(name, anchors, threshold)
+
+def _plausible(corrected: str, original: str) -> bool:
+    """LLM 교정이 원본의 한글 부분과 닮았는지 결정적 가드.
+
+    프롬프트의 보존 규칙은 강제력이 없다 — 모델이(또는 프롬프트 인젝션이) 전혀 다른
+    이름을 내놔도 여기서 막는다. 원본에서 노이즈(가격·번호·기호)를 뺀 한글만 남기고
+    비교하므로, 정상 교정(오타 1~2자모, 노이즈 제거)은 통과한다.
+    """
+    base = " ".join(_NON_HANGUL.sub(" ", original).split()) or original
+    return difflib.SequenceMatcher(None, _jamo(corrected), _jamo(base)).ratio() >= 0.5
+
+
+async def clean_one(name: str, anchors: list[str], normalize: Normalizer) -> dict:
+    snapped = snap(name, anchors)
     if snapped is not None:
         return {"original": name, "name": snapped, "method": "snap", "reason": ""}
     fix = await normalize(name)
     corrected = fix.corrected.strip()
-    if not corrected or corrected == name:
-        # 빈 출력·무변경은 원본 유지 — 수집 데이터를 지우거나 과교정하지 않는다.
+    if not corrected or corrected == name or not _plausible(corrected, name):
+        # 빈 출력·무변경·원본과 동떨어진 출력은 원본 유지 — 지우거나 과교정하지 않는다.
         return {"original": name, "name": name, "method": "unchanged", "reason": fix.reason}
     return {"original": name, "name": corrected, "method": "llm", "reason": fix.reason}
 
