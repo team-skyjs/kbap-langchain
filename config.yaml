@@ -7,7 +7,7 @@ llm:
   model: openai:gpt-5-nano # 전 노드 nano 실험 — 품질 미달인 노드가 확인되면 그 노드만 다시 올린다
   avoidance_model: openai:gpt-5-nano # 주의: 과거 소형 모델이 후보 밖 코드를 반환한 사례 — valid_substances 필터·rev_avoid 검수가 방어선이니 결과를 주시할 것
   judge_model: openai:gpt-5-nano # 종합판정 — 점수 요약 읽고 통과/탈락만 정하므로 나노로 충분
-  namefix_model: openai:gpt-5-mini # 이름 정제 — nano 실험에서 유일하게 품질 미달(오타 교정 실패), mini 유지
+  namefix_model: openai:gpt-5.6-luna # 이름 정제 — nano는 품질 미달, 5.6-luna가 mini보다 최신·저렴($0.20/$1.20 vs $0.25/$2.00)
   # gen_model: openai:gpt-5 # 번역·설명 생성만 상위 모델로 — 비용이 크게 늘므로 품질 미달이 데이터로 확인될 때만
   timeout_seconds: 120 # LLM 호출 타임아웃. 모델이 느려지면 이 값을 조정
 thresholds: # 필드군별 통과 임계값 — 운영 중 조정
