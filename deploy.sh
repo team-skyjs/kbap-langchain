@@ -19,11 +19,15 @@ aws ecr get-login-password --region "$REGION" |
 docker build --platform linux/arm64 --provenance=false -t "$IMAGE" .
 docker push "$IMAGE"
 
-if aws lambda get-function --function-name "$FUNCTION" --region "$REGION" >/dev/null 2>&1; then
+# "함수 없음"과 권한 에러를 구분한다 — AccessDenied 를 삼키면 배포가 조용히 누락된다.
+if err=$(aws lambda get-function --function-name "$FUNCTION" --region "$REGION" 2>&1 >/dev/null); then
   aws lambda update-function-code --function-name "$FUNCTION" \
     --image-uri "$IMAGE" --region "$REGION" --no-cli-pager >/dev/null
   echo "배포 완료: $FUNCTION <- $IMAGE"
-else
+elif grep -q ResourceNotFound <<<"$err"; then
   echo "push 완료: $IMAGE"
   echo "Lambda 함수($FUNCTION)가 아직 없다 — 콘솔에서 이 이미지로 생성한 뒤 다시 실행하면 코드 업데이트까지 수행된다."
+else
+  echo "$err" >&2
+  exit 1
 fi
