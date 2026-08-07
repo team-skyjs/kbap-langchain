@@ -197,7 +197,9 @@ class TranslationItem(BaseModel):
     @field_validator("text")
     @classmethod
     def _not_blank(cls, v: str) -> str:
-        if not v.strip():
+        # 설명과 같은 마침표 금지 정책 — 언어별 종결 부호(. 。)까지 잘라낸다.
+        v = v.strip().rstrip(".。")
+        if not v:
             raise ValueError("번역 값은 빈 문자열일 수 없다")
         return v
 

@@ -92,9 +92,10 @@ DESC_TR_TEMPLATE = f"""당신은 한식 메뉴 데이터베이스 담당자입�
 items: 설명을 9개 언어로 실제 번역한 값 (템플릿 문구·원문 복사 금지)
 {_TRANSLATION_RULES}
 - 원문에 없는 내용을 더하거나 빼지 않는다.
+- 문장 끝에 마침표·종결 부호를 붙이지 않는다 (".", "。" 등 생략).
 - 예시(치즈볼 "치즈를 넣은 반죽을 둥글게 튀긴 사이드 메뉴"):
-  en "Round fried dough balls filled with cheese.", ja "チーズを入れた生地を丸く揚げたサイドメニュー。",
-  zh-Hans "面团包入芝士后炸成圆球的小吃。\""""
+  en "Round fried dough balls filled with cheese", ja "チーズを入れた生地を丸く揚げたサイドメニュー",
+  zh-Hans "面团包入芝士后炸成圆球的小吃\""""
 
 INGREDIENTS_GEN_TEMPLATE = """너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
 기피성분의 포함 확률을 1~100 정수로 매기고, 음식의 맵기를 0~10 정수로 판정하라.
