@@ -167,7 +167,8 @@ NAME_TR_REVIEW_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한�
 음식 이름(한국어): {{name}}
 이름 번역: {{translations}}
 
-items 배열은 정확히 {{lang_count}}개({{langs}}), 각각 lang·score·reason(한국어 한 문장)."""
+items 배열은 정확히 {{lang_count}}개({{langs}}), 각각 lang·reason·score.
+reason 은 {{pass_score}}점 미만인 언어만 한국어 한 문장으로 쓰고, 그 외에는 빈 문자열로 두세요."""
 
 DESC_REVIEW_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 설명과 설명 번역을 함께 0~100점
 하나로 채점하세요:

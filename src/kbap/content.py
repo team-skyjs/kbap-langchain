@@ -301,7 +301,7 @@ def avoid_gen_prompt(name: str, feedback: str) -> str:
     )
 
 
-def name_tr_review_prompt(name: str, translations: dict) -> str:
+def name_tr_review_prompt(name: str, translations: dict, pass_score: int) -> str:
     return render_prompt(
         "food-name-translation-review",
         NAME_TR_REVIEW_TEMPLATE,
@@ -309,6 +309,7 @@ def name_tr_review_prompt(name: str, translations: dict) -> str:
         translations=json.dumps(translations, ensure_ascii=False),
         lang_count=len(TARGET_LANGS),
         langs=LANGS,
+        pass_score=pass_score,
     )
 
 
@@ -399,11 +400,17 @@ def make_fns(
 
     async def rev_name_tr(name: str, translations: dict) -> FieldScore:
         result: TranslationScores = await tr_score_llm.ainvoke(
-            name_tr_review_prompt(name, translations)
+            name_tr_review_prompt(name, translations, thresholds.translations)
         )
         scores = lang_scores(result)  # 누락 언어를 0점으로 채우는 fail-closed 로직 재사용
         worst = min(scores.values(), key=lambda s: s.score)
-        failing = [f"{lang} {s.score}점: {s.reason}" for lang, s in scores.items() if s.score < 100]
+        # 기준 미만 언어만 reason이 오므로(출력 토큰 절감) 피드백도 그 언어들로만 구성한다.
+        # 모델이 지시를 어기고 reason 없이 기준 미만 점수를 준 언어도 점수는 남긴다(fail-closed).
+        failing = [
+            f"{lang} {s.score}점: {s.reason}".rstrip(": ")
+            for lang, s in scores.items()
+            if s.reason or s.score < thresholds.translations
+        ]
         return FieldScore(score=worst.score, reason="; ".join(failing) or "이상 없음")
 
     async def rev_desc(name: str, description: str, translations: dict) -> FieldScore:

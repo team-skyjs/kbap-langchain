@@ -144,7 +144,8 @@ class FieldScore(BaseModel):
 
 class TranslationLangScore(BaseModel):
     lang: str
-    reason: str
+    # 통과 언어는 reason을 비워 출력 토큰을 아낀다 — 프롬프트가 기준 미만 언어만 쓰도록 지시한다.
+    reason: str = ""
     score: int = Field(ge=0, le=100)
 
 
