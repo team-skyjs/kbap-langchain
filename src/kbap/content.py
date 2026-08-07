@@ -142,9 +142,20 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
         score = await fns.review_ingredients(state["cleaned_name"], state["ingredients"])
         return {"ingredient_score": score, "ingredient_feedback": score.reason}
 
-    # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다
+    # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다.
+    # 기피성분만은 결정론적 fail-closed: 프롬프트의 "임계값 미달은 탈락" 지시는 강제력이
+    # 없고, 알레르기 데이터는 오통과가 누락보다 위험하다(valid_substances 필터와 같은 철학).
     async def judge(state: ContentState):
-        return {"verdict": await fns.judge(dict(state))}
+        verdict = await fns.judge(dict(state))
+        ingredient = state["ingredient_score"]
+        if verdict.passed and ingredient.score < thresholds.avoidance:
+            verdict = JudgeVerdict(
+                passed=False,
+                reason=f"기피성분 {ingredient.score}점 < 임계값 {thresholds.avoidance}: "
+                f"{ingredient.reason}",
+                rejected_fields=["avoidance"],
+            )
+        return {"verdict": verdict}
 
     def _route(score_key: str, attempts_key: str, threshold: int, retry_target: str):
         def route(state: ContentState) -> str:
@@ -204,6 +215,10 @@ LANGS = ", ".join(TARGET_LANGS)
 # 생성 결과 형식 검증 — 스프링이 LLM 응답 경계에서 require 로 잡던 규칙의 이관.
 # pydantic ValidationError 는 _retryable 에 걸려 그래프 RetryPolicy 가 재생성을 유도한다.
 # scoring.FieldScore와 같은 이유로 reason을 결과보다 앞에 두어 근거를 먼저 세우게 한다.
+# 마침표 금지 정책이 잘라내는 종결 부호 — 반각·전각·일본어/중국어 마침표.
+_TRAILING_PERIODS = ".。．"
+
+
 class TranslationItem(BaseModel):
     lang: str
     text: str = Field(min_length=1)
@@ -211,8 +226,8 @@ class TranslationItem(BaseModel):
     @field_validator("text")
     @classmethod
     def _not_blank(cls, v: str) -> str:
-        # 설명과 같은 마침표 금지 정책 — 언어별 종결 부호(. 。)까지 잘라낸다.
-        v = v.strip().rstrip(".。")
+        # 설명과 같은 마침표 금지 정책 — 언어별 종결 부호까지 잘라낸다.
+        v = v.strip().rstrip(_TRAILING_PERIODS)
         if not v:
             raise ValueError("번역 값은 빈 문자열일 수 없다")
         return v
@@ -243,15 +258,19 @@ class IngredientsGen(BaseModel):
 
 
 class DescGen(BaseModel):
-    description: str = Field(max_length=255)
+    description: str
 
     @field_validator("description")
     @classmethod
     def _not_blank_or_placeholder(cls, v: str) -> str:
         # 마침표 금지는 프롬프트로 지시하되, 모델이 어겨도 재생성 대신 잘라낸다(콘텐츠 정책).
-        v = v.strip().rstrip(".")
+        # 길이 검사는 마침표 제거 후에 한다 — Field(max_length)는 validator보다 먼저 실행돼
+        # "255자 + 마침표" 입력을 잘라내지 못하고 탈락시킨다.
+        v = v.strip().rstrip(_TRAILING_PERIODS)
         if not v or v == "설명 준비 중":
             raise ValueError("설명은 비거나 플레이스홀더일 수 없다")
+        if len(v) > 255:
+            raise ValueError("설명은 255자 이하여야 한다")
         return v
 
 

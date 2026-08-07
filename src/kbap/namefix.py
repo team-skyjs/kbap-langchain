@@ -18,7 +18,9 @@ from pydantic import BaseModel
 class NameFix(BaseModel):
     reason: str
     # 단일 음식 메뉴명이 아니면(옵션·카테고리 제목·판독 불가) False — 그래프가 생성 없이 끝낸다.
-    # 기본 True: 구버전 프롬프트가 이 필드를 지시하지 않아도 기존 동작(전부 통과)을 유지한다.
+    # 주의: strict structured output은 모든 필드를 필수로 만들어 모델이 이 값을 반드시 생성한다.
+    # 판정 기준은 프롬프트(food-namefix v4+)가 지시해야 하며, 기본 True는 스키마를 강제하지
+    # 않는 경로에서만 안전값으로 동작한다.
     is_food: bool = True
     corrected: str
 

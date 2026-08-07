@@ -99,6 +99,22 @@ async def test_happy_path_populates_all_content():
     assert len(rec["judge"]) == 1
 
 
+async def test_low_ingredient_score_fails_even_if_judge_passes():
+    # 안전 fail-closed: LLM judge가 통과를 줘도 기피성분 임계값 미달이면 코드가 탈락시킨다.
+    rec = defaultdict(list)
+
+    async def lenient_judge(state):
+        return JudgeVerdict(reason="관대한 판정", passed=True, rejected_fields=[])
+
+    fns = build_fns(rec, ingredient_seq=(30, 30))._replace(judge=lenient_judge)
+    graph = build_content_graph(fns, TH)
+    state = await graph.ainvoke({"food_name": "김치찌개"})
+
+    assert state["verdict"].passed is False
+    assert state["verdict"].rejected_fields == ["avoidance"]
+    assert "임계값" in state["verdict"].reason
+
+
 async def test_non_food_ends_graph_without_generation():
     # "사리 추가" 같은 옵션·판독 불가 입력은 정제 노드에서 그래프를 끝내 생성 8콜을 아낀다.
     rec = defaultdict(list)
@@ -217,6 +233,7 @@ def test_translation_item_strips_trailing_period():
 
     assert TranslationItem(lang="en", text="Fried cheese balls.").text == "Fried cheese balls"
     assert TranslationItem(lang="ja", text="チーズボール。").text == "チーズボール"
+    assert TranslationItem(lang="zh-Hant", text="起司球．").text == "起司球"  # 전각 마침표
 
 
 def test_desc_gen_strips_trailing_period():
@@ -224,6 +241,8 @@ def test_desc_gen_strips_trailing_period():
     assert DescGen(description="치즈를 넣어 튀긴 사이드 메뉴.").description == "치즈를 넣어 튀긴 사이드 메뉴"
     with pytest.raises(ValidationError):
         DescGen(description="...")  # 마침표뿐인 설명은 빈 값으로 취급
+    # 길이 검사는 마침표 제거 후 — 255자 + 마침표는 탈락이 아니라 255자로 정리된다.
+    assert DescGen(description="가" * 255 + ".").description == "가" * 255
 
 
 def test_translations_require_all_nine_languages():
