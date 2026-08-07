@@ -1,10 +1,16 @@
 """콘텐츠 그래프의 실 LLM 노드 구현.
 
 검수 쪽은 kbap_review.scoring 의 프롬프트·모델을 재사용하고,
-이름 정제는 kbap_namefix 를 그대로 쓴다. 생성 프롬프트만 여기서 새로 정의한다.
+이름 정제는 kbap_namefix 를 그대로 쓴다.
+
+생성 프롬프트는 kbap(Spring) infra/llm/food 의 운영 프롬프트를 이식한 것이다:
+SpringAiFoodNameTranslationClient / SpringAiFoodDescriptionClient(설명·번역을 두 노드로 분리)
+/ SpringAiFoodAvoidanceAssessmentClient. JSON 출력 형식 지시는 structured output 이
+대체하므로 뺐고, 의미 규칙·예시·휴리스틱은 그대로 가져왔다. 원본이 바뀌면 여기도 맞출 것.
 """
 
 import json
+import re
 
 from pydantic import BaseModel, Field
 
@@ -45,69 +51,161 @@ class DescGen(BaseModel):
     description: str
 
 
+# 모델 응답에서 후보 밖 코드를 저장 전에 걸러낸다 — kbap KB-236(후보 밖 코드 유출) 방어를
+# 프롬프트에만 맡기지 않는다. 중복 코드는 첫 값만 남긴다.
+_CODE = re.compile(r"([A-Z_]+)\(")
+VALID_CODES = frozenset(_CODE.findall(AVOIDANCE_CODES))
+
+
+def valid_substances(items: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out = []
+    for item in items:
+        code = item["code"]
+        if code not in VALID_CODES or code in seen:
+            continue
+        seen.add(code)
+        out.append(item)
+    return out
+
+
 def _feedback_block(feedback: str) -> str:
     if not feedback:
         return ""
     return f"""
 
-# 이전 시도 탈락 사유 — 반드시 반영해 다시 만드세요
+## 이전 시도 탈락 사유 — 반드시 반영해 다시 만드세요
 {feedback}"""
 
 
 def _translation_rules() -> str:
-    return f"""출력 규칙 — 반드시 지키세요:
-- items 배열은 정확히 {len(TARGET_LANGS)}개, 아래 lang 값을 문자 그대로 사용: {LANGS}
-- 각 항목은 반드시 그 lang 이 가리키는 언어로 실제 표기할 것"""
+    return f"""- 언어(9개, 순서 고정): {LANGS}. 9개 전수 채우고 빈 값 금지.
+- 각 언어의 문자 체계를 따른다 (ja 는 일본어 표기, ru 는 키릴 문자, th 는 태국 문자)."""
 
 
 def name_tr_prompt(name: str, feedback: str) -> str:
-    return f"""당신은 한국 음식 이름 번역가입니다. 외국인 관광객이 메뉴에서 알아볼 수 있도록
-음식 이름을 각 언어로 번역하세요. 음차보다 뜻이 전달되는 번역을 우선하되,
-널리 알려진 이름(Kimchi, Bibimbap 등)은 관용 표기를 씁니다.
+    return f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식명을 외국인 손님이 메뉴판에서 읽을
+번역명으로 만드세요.
+음식명: "{name}"
 
-음식 이름(한국어): {name}
+## 생성 항목
 
-{_translation_rules()}{_feedback_block(feedback)}"""
+items: 음식명을 9개 언어로 번역한 값
+{_translation_rules()}
+
+## 번역 규칙
+
+- 널리 알려진 한식은 그 언어권에서 통용되는 표기를 쓴다 (Kimchi, Bibimbap, キンパ, 泡菜).
+- 통용 표기가 없으면 음식을 알아볼 수 있게 짧게 의역한다 (된장술밥 → Soybean Paste Rice).
+- 메뉴판에 올릴 이름이므로 간결하게. 문장·설명·괄호 병기 금지.
+- 예시(치즈볼): en "Cheese Balls", es "Bolas de queso", ja "チーズボール", zh-Hans "芝士球"
+
+## 입력이 불완전할 때
+
+- 오탈자·띄어쓰기 오류로 보이면 가장 유사한 실제 한식 메뉴로 추론해 고친 이름 기준으로
+  번역한다 (김치찌게 → 김치찌개, 짜장면/자장면 동일 취급).
+- 상호·수식어가 붙어 있으면 음식 본체 기준으로 번역한다 (원조할매국밥 → 국밥,
+  왕돈까스(대) → 왕돈까스).
+- 로제떡볶이·마라탕면처럼 합성·변형 메뉴는 구성 요소를 조합해 번역한다.
+- 파스타·피자 같은 외래 음식은 각 언어의 통용 표기를 그대로 쓴다.
+- 그래도 모르는 음식이면 건너뛰지 말고 음식명의 구성 요소를 기준으로 번역한다.{_feedback_block(feedback)}"""
 
 
 def desc_prompt(name: str, feedback: str) -> str:
-    return f"""당신은 한국 음식 콘텐츠 작가입니다. 이 음식을 처음 보는 외국인 관광객에게
-무슨 음식인지 그려지도록 한국어 설명을 2~3문장으로 쓰세요.
-주재료·조리법·맛을 사실대로 담고, 들어가지 않는 재료를 지어내지 마세요.
+    return f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식의 한국어 한 줄 설명을 생성하세요.
+음식명: "{name}"
 
-음식 이름: {name}
+## 생성 항목
 
-설명 텍스트만 반환하세요.{_feedback_block(feedback)}"""
+description: 한국어 한 줄 설명
+- 요리법·주재료가 드러나는 한 문장. 과장 없이 사실적으로.
+- 반드시 255자 이하. 빈 값·"설명 준비 중" 같은 템플릿 문구 금지.
+- 예시(치즈볼): "치즈를 넣은 반죽을 둥글게 튀긴 사이드 메뉴"
+
+## 규칙
+
+- 음식명에 오탈자·띄어쓰기 오류가 보이면 가장 유사한 실제 한식 메뉴로 추론해 그 음식
+  기준으로 작성하세요 (김치찌게 → 김치찌개). 상호·수식어가 붙어 있으면 음식 본체 기준.
+- 모르는 음식이어도 건너뛰지 말고 일반적인 한식 지식 기준으로 작성하세요.{_feedback_block(feedback)}"""
 
 
 def desc_tr_prompt(name: str, description: str) -> str:
-    return f"""당신은 다국어 번역가입니다. 한국 음식 설명을 각 언어로 번역하세요.
-원문에 없는 내용을 더하거나 빼지 말고, 그 언어 화자가 자연스럽게 읽히게 옮기세요.
+    return f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식 설명을 9개 언어로 번역하세요.
+음식명: "{name}"
+설명(한국어): "{description}"
 
-음식 이름: {name}
-설명(한국어): {description}
+## 생성 항목
 
-{_translation_rules()}"""
+items: 설명을 9개 언어로 실제 번역한 값 (템플릿 문구·원문 복사 금지)
+{_translation_rules()}
+- 원문에 없는 내용을 더하거나 빼지 않는다.
+- 예시(치즈볼 "치즈를 넣은 반죽을 둥글게 튀긴 사이드 메뉴"):
+  en "Round fried dough balls filled with cheese.", ja "チーズを入れた生地を丸く揚げたサイドメニュー。",
+  zh-Hans "面团包入芝士后炸成圆球的小吃。\""""
 
 
 def avoid_gen_prompt(name: str, feedback: str) -> str:
-    return f"""당신은 식품 안전 조사원입니다. 이 한국 음식의 일반적인 레시피 기준으로
-기피성분과 매운맛 등급을 산출하세요. 알레르기·비건·종교 안전에 직결되므로
-주요 성분 누락이 가장 위험합니다.
+    return f"""너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
+기피성분의 포함 확률을 1~100 정수로 매기고, 음식의 맵기를 0~10 정수로 판정하라.
+음식명: "{name}"
 
-# inclusionPercent — "아무 식당에서나 시켰을 때 한 접시에 이 성분이 들어 있을 확률"
-95~100 정의상 반드시 / 80~95 표준 레시피 핵심 재료 / 55~80 대부분 넣지만 집집마다 다름 /
-30~55 흔한 선택 재료·고명·양념 / 10~30 일부 식당·변형만 / 1~10 미량·교차오염
+# spiciness (맵기) 의 의미
+- 0: 맵지 않음 (계란말이, 치즈볼 등)
+- 1~3: 약간 매콤 (제육볶음 순한맛, 김치찌개 등)
+- 4~6: 보통 매움 (떡볶이, 닭갈비 등)
+- 7~10: 매우 매움 (불닭, 매운 갈비찜, 마라 계열 등)
 
-# spiciness (0~10)
-0 맵지 않음(계란말이) / 1~3 약간 매콤(김치찌개) / 4~6 보통 매움(떡볶이) / 7~10 매우 매움(불닭)
+# inclusionPercent 의 의미
+"손님이 아무 식당에서나 이 메뉴를 시켰을 때, 그 한 접시에 이 성분이 들어 있을 확률."
+양(量)이 아니라 포함 여부의 확률이다. 값 기준:
+- 95~100: 정의상 반드시 들어감 (김밥의 쌀, 라떼의 우유)
+- 80~95 : 표준 레시피 핵심 재료 (떡볶이의 고추장→SOY)
+- 55~80 : 대부분 넣지만 집집마다 다름 (김밥의 계란)
+- 30~55 : 흔한 선택 재료·고명·양념 (부침의 쪽파)
+- 10~30 : 일부 식당·지역·변형에서만 (감자탕의 들깨)
+- 1~10  : 미량·교차오염·드문 변형
+present(들어갈 가능성 있는)만 나열한다. 사실상 0%인 성분은 뺀다. 애매하면 낮은 값으로
+포함하되, 5 미만이면 대개 생략. 기피성분이 사실상 없는 메뉴(아메리카노, 공기밥 등)는
+빈 배열([])을 반환한다.
 
-# 후보 성분 코드 — 이 목록 안에서만 고르세요
+# 반드시 추적할 숨은·파생 성분 (겉에 안 보여도 양념·육수·가공품 속에 있음)
+- 양조간장(거의 모든 볶음·조림·양념): SOY 90+, WHEAT 75+ (한국 양조간장엔 밀)
+- 고추장·된장·쌈장·춘장: SOY 90+
+- 어묵·맛살·게맛살·크래미: FISH 90+, WHEAT 70+
+- 멸치육수·다시: ANCHOVY 60~85, FISH 70+, DASHI 40+
+- 사골·고기육수: BEEF 또는 PORK 70+, BROTH
+- 액젓·멸치액젓(김치·양념): FISH_SAUCE 80+, ANCHOVY, FISH
+- 새우젓(돼지·순대·만두양념): SALTED_SHRIMP, SHRIMP
+- 굴소스: OYSTER_SAUCE, OYSTER
+- 밀가루 반죽·튀김옷·부침·면·빵·만두피: WHEAT 90+
+- 튀김옷·부침 반죽: EGG 40~70
+- 마요네즈(샐러드·핫도그·양념): EGG 85+
+- 치즈: MILK 95, DAIRY 95, CHEESE 95, RENNET 40
+- 버터·크림·우유·라떼: MILK/DAIRY 95+, 버터일 때 BUTTER
+- 카라멜소스·연유: MILK/DAIRY
+- 떡볶이·라볶이의 떡: 밀떡 흔함 → WHEAT 40~70
+- 소시지·햄·베이컨·스팸: PORK 90+
+- 맥주·매실주·청주·막걸리: ALCOHOL 100 (맥주엔 BARLEY·WHEAT, 막걸리엔 WHEAT 흔함)
+- 미림·맛술: MIRIN, ALCOHOL, COOKING_WINE
+- 김치(반찬·찌개·볶음밥): FISH_SAUCE 70+, SALTED_SHRIMP 50+, GARLIC, SCALLION
+- 파·대파·쪽파·마늘·양파: SCALLION/GARLIC/ONION, 한식 양념 베이스 대개 60~90
+- 참기름·깨소금(거의 모든 한식 마무리): SESAME 70~95
+
+# 후보 성분 코드 (이 목록 밖 code 절대 금지)
 {AVOIDANCE_CODES}
+출력의 모든 code 는 반드시 위 후보 목록 안에 있어야 한다. 위 휴리스틱이 가리키는 성분이라도
+후보 목록에 없으면 절대 출력하지 마라(확률이 높아도 뺀다).
 
-음식 이름: {name}
-
-레시피에 거의 항상 들어가는 재료부터 후보 목록과 대조해 빠짐없이 넣으세요.{_feedback_block(feedback)}"""
+# 규칙
+- 음식명에 명백한 오탈자가 보이면 가장 유사한 실제 한식 메뉴로 추론해 판단하라
+  (김치찌게 → 김치찌개). 단 어떤 음식인지 애매하면 지어내지 말고 이름 그대로 보수적으로
+  판단하라 — 안전 데이터이므로 잘못된 추론이 누락보다 위험하다.
+- SEAFOOD/FISH/POULTRY 는 총칭이다. 구체 종(SHRIMP, SALMON, CHICKEN 등)을 넣을 땐
+  총칭도 함께 넣되, 총칭 확률 ≥ 구체 종 확률이 되게 하라.
+- ASAFOETIDA, LUPIN, GHEE, GOAT_MILK, RYE, BRAZIL_NUT 등은 한식에 거의 없다.
+  근거 없이 넣지 마라.
+- 확신 없는 성분은 지어내지 말고 낮은 값으로 두거나 생략하라.
+- 같은 code 를 중복하지 마라.{_feedback_block(feedback)}"""
 
 
 def name_tr_review_prompt(name: str, translations: dict) -> str:
@@ -193,10 +291,11 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
         return {i.lang: i.text for i in result.items}
 
     async def gen_avoid(name: str, feedback: str) -> dict:
-        # ponytail: 모델 지식만 사용 — 희귀 메뉴 정확도가 부족해지면 web_search 도구 바인딩
+        # ponytail: 단일 모델 — kbap 은 다중 모델 fanout+minAgreement(2)로 종합한다.
+        # 안전 데이터 정확도가 아쉬우면 그 합의 구조(또는 web_search 도구)를 이식할 것.
         result: AvoidanceGen = await avoid_llm.ainvoke(avoid_gen_prompt(name, feedback))
         return {
-            "substances": [i.model_dump() for i in result.items],
+            "substances": valid_substances([i.model_dump() for i in result.items]),
             "spiciness": result.spiciness,
         }
 

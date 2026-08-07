@@ -10,8 +10,10 @@ from typing import NamedTuple, TypedDict
 from pydantic import BaseModel
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import RetryPolicy
 
 from kbap_review.config import Thresholds
+from kbap_review.graph import _retryable
 from kbap_review.scoring import FieldScore
 
 
@@ -102,17 +104,19 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
 
         return route
 
+    # structured output 파싱 실패 재시도 — kbap_review.graph 와 같은 이유(전부 LLM 노드).
+    retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ContentState)
-    g.add_node("clean_name", clean_name)
-    g.add_node("gen_name_tr", gen_name_tr)
-    g.add_node("rev_name_tr", rev_name_tr)
-    g.add_node("gen_desc", gen_desc)
-    g.add_node("gen_desc_tr", gen_desc_tr)
-    g.add_node("rev_desc", rev_desc)
-    g.add_node("gen_avoid", gen_avoid)
-    g.add_node("rev_avoid", rev_avoid)
+    g.add_node("clean_name", clean_name, retry_policy=retry)
+    g.add_node("gen_name_tr", gen_name_tr, retry_policy=retry)
+    g.add_node("rev_name_tr", rev_name_tr, retry_policy=retry)
+    g.add_node("gen_desc", gen_desc, retry_policy=retry)
+    g.add_node("gen_desc_tr", gen_desc_tr, retry_policy=retry)
+    g.add_node("rev_desc", rev_desc, retry_policy=retry)
+    g.add_node("gen_avoid", gen_avoid, retry_policy=retry)
+    g.add_node("rev_avoid", rev_avoid, retry_policy=retry)
     # defer=True — 세 갈래가 서로 다른 횟수로 재시도해도, 전부 끝난 뒤 정확히 한 번 실행된다.
-    g.add_node("judge", judge, defer=True)
+    g.add_node("judge", judge, defer=True, retry_policy=retry)
 
     g.add_edge(START, "clean_name")
     g.add_edge("clean_name", "gen_name_tr")
