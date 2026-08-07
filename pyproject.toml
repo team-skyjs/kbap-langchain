@@ -1,7 +1,7 @@
 [project]
 name = "kbap-review"
 version = "0.1.0"
-description = "food 최종 검수(scoring) LangGraph 배치"
+description = "음식 콘텐츠 생성·검수 LangGraph 파이프라인 — kbap(Spring) 콘텐츠 배치를 대체한다"
 requires-python = ">=3.12"
 dependencies = [
     "langgraph>=1.0",

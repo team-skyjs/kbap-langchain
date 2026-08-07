@@ -1,4 +1,8 @@
-"""스캔 음식 이름 정제 — 자모 스냅·LLM 보수적 정규화·배치 실행."""
+"""스캔 음식 이름 정제 — 자모 스냅·LLM 보수적 정규화·배치 실행.
+
+콘텐츠 파이프라인의 첫 단계다: 여기서 정제된 이름이 생성·검수 전체의 입력이 된다.
+kbap.content 그래프가 clean_one/make_normalizer 를 그대로 쓰며, 단독 배치
+(main.py namefix)는 로컬 JSON 으로 정제만 돌려보는 디버깅용이다."""
 
 from collections.abc import Awaitable, Callable
 import asyncio

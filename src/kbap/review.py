@@ -1,4 +1,8 @@
-"""음식 콘텐츠 최종 검수 배치 — 설정·kbap 클라이언트·채점 프롬프트·판정·그래프·실행기."""
+"""음식 콘텐츠 최종 검수 배치 — 설정·kbap 클라이언트·채점 프롬프트·판정·그래프·실행기.
+
+이관 과도기용이다: 아직 스프링 배치가 생성한 콘텐츠(PENDING_REVIEW)를 검수해 반영한다.
+생성까지 kbap.content 그래프로 전량 이관되면 이 배치는 은퇴하고, 채점 프롬프트·판정
+로직은 content 그래프의 검수 노드가 이미 재사용하고 있다."""
 
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple, TypedDict

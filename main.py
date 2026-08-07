@@ -1,9 +1,14 @@
-"""모든 배치의 단일 진입점.
+"""단일 진입점.
+
+이 프로젝트는 음식 콘텐츠의 생성과 검수를 전부 담당하는 것이 목표다 —
+kbap(Spring) 콘텐츠 배치의 LLM 로직을 이쪽으로 옮겨 없애는 방향이며,
+스프링에는 수집(OCR)·저장·SQS 발행·관리자 승인 UI만 남긴다.
 
   uv run python main.py review  --limit 50 [--dry-run] [--config config.yaml]
   uv run python main.py namefix --input names.json [--anchors anchors.json] [--output out.json]
 
-Lambda는 SQS 메시지를 batchSize 10으로 소비하며 main.handler를 진입점으로 사용한다.
+본체는 kbap.content 의 콘텐츠 그래프이며, Lambda가 SQS 메시지를 batchSize 10으로
+소비해 실행한다(진입점 main.handler). review/namefix 는 이관 과도기의 보조 배치다.
 """
 
 import argparse
