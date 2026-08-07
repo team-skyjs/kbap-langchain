@@ -34,6 +34,7 @@ from kbap.review import (
     avoidance_prompt,
     lang_scores,
     make_callbacks,
+    render_prompt,
 )
 
 
@@ -230,20 +231,19 @@ def _feedback_block(feedback: str) -> str:
 {feedback}"""
 
 
-def _translation_rules() -> str:
-    return f"""- 언어(9개, 순서 고정): {LANGS}. 9개 전수 채우고 빈 값 금지.
+# 언어 규칙 블록 — 이름 번역·설명 번역 템플릿에 공통으로 들어간다. {{langs}} 는 변수.
+_TRANSLATION_RULES = """- 언어(9개, 순서 고정): {{langs}}. 9개 전수 채우고 빈 값 금지.
 - 각 언어의 문자 체계를 따른다 (ja 는 일본어 표기, ru 는 키릴 문자, th 는 태국 문자)."""
 
 
-def name_tr_prompt(name: str, feedback: str) -> str:
-    return f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식명을 외국인 손님이 메뉴판에서 읽을
+NAME_TR_TEMPLATE = f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식명을 외국인 손님이 메뉴판에서 읽을
 번역명으로 만드세요.
-음식명: "{name}"
+음식명: "{{{{name}}}}"
 
 ## 생성 항목
 
 items: 음식명을 9개 언어로 번역한 값
-{_translation_rules()}
+{_TRANSLATION_RULES}
 
 ## 번역 규칙
 
@@ -260,12 +260,21 @@ items: 음식명을 9개 언어로 번역한 값
   왕돈까스(대) → 왕돈까스).
 - 로제떡볶이·마라탕면처럼 합성·변형 메뉴는 구성 요소를 조합해 번역한다.
 - 파스타·피자 같은 외래 음식은 각 언어의 통용 표기를 그대로 쓴다.
-- 그래도 모르는 음식이면 건너뛰지 말고 음식명의 구성 요소를 기준으로 번역한다.{_feedback_block(feedback)}"""
+- 그래도 모르는 음식이면 건너뛰지 말고 음식명의 구성 요소를 기준으로 번역한다.{{{{feedback_block}}}}"""
 
 
-def desc_prompt(name: str, feedback: str) -> str:
-    return f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식의 한국어 한 줄 설명을 생성하세요.
-음식명: "{name}"
+def name_tr_prompt(name: str, feedback: str) -> str:
+    return render_prompt(
+        "food-name-translation",
+        NAME_TR_TEMPLATE,
+        name=name,
+        langs=LANGS,
+        feedback_block=_feedback_block(feedback),
+    )
+
+
+DESC_TEMPLATE = """당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식의 한국어 한 줄 설명을 생성하세요.
+음식명: "{{name}}"
 
 ## 생성 항목
 
@@ -278,28 +287,42 @@ description: 한국어 한 줄 설명
 
 - 음식명에 오탈자·띄어쓰기 오류가 보이면 가장 유사한 실제 한식 메뉴로 추론해 그 음식
   기준으로 작성하세요 (김치찌게 → 김치찌개). 상호·수식어가 붙어 있으면 음식 본체 기준.
-- 모르는 음식이어도 건너뛰지 말고 일반적인 한식 지식 기준으로 작성하세요.{_feedback_block(feedback)}"""
+- 모르는 음식이어도 건너뛰지 말고 일반적인 한식 지식 기준으로 작성하세요.{{feedback_block}}"""
 
 
-def desc_tr_prompt(name: str, description: str) -> str:
-    return f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식 설명을 9개 언어로 번역하세요.
-음식명: "{name}"
-설명(한국어): "{description}"
+def desc_prompt(name: str, feedback: str) -> str:
+    return render_prompt(
+        "food-description", DESC_TEMPLATE, name=name, feedback_block=_feedback_block(feedback)
+    )
+
+
+DESC_TR_TEMPLATE = f"""당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식 설명을 9개 언어로 번역하세요.
+음식명: "{{{{name}}}}"
+설명(한국어): "{{{{description}}}}"
 
 ## 생성 항목
 
 items: 설명을 9개 언어로 실제 번역한 값 (템플릿 문구·원문 복사 금지)
-{_translation_rules()}
+{_TRANSLATION_RULES}
 - 원문에 없는 내용을 더하거나 빼지 않는다.
 - 예시(치즈볼 "치즈를 넣은 반죽을 둥글게 튀긴 사이드 메뉴"):
   en "Round fried dough balls filled with cheese.", ja "チーズを入れた生地を丸く揚げたサイドメニュー。",
   zh-Hans "面团包入芝士后炸成圆球的小吃。\""""
 
 
-def avoid_gen_prompt(name: str, feedback: str) -> str:
-    return f"""너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
+def desc_tr_prompt(name: str, description: str) -> str:
+    return render_prompt(
+        "food-description-translation",
+        DESC_TR_TEMPLATE,
+        name=name,
+        description=description,
+        langs=LANGS,
+    )
+
+
+AVOID_GEN_TEMPLATE = """너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
 기피성분의 포함 확률을 1~100 정수로 매기고, 음식의 맵기를 0~10 정수로 판정하라.
-음식명: "{name}"
+음식명: "{{name}}"
 
 # spiciness (맵기) 의 의미
 - 0: 맵지 않음 (계란말이, 치즈볼 등)
@@ -344,7 +367,7 @@ present(들어갈 가능성 있는)만 나열한다. 사실상 0%인 성분은 �
 - 참기름·깨소금(거의 모든 한식 마무리): SESAME 70~95
 
 # 후보 성분 코드 (이 목록 밖 code 절대 금지)
-{AVOIDANCE_CODES}
+{{candidate_codes}}
 출력의 모든 code 는 반드시 위 후보 목록 안에 있어야 한다. 위 휴리스틱이 가리키는 성분이라도
 후보 목록에 없으면 절대 출력하지 마라(확률이 높아도 뺀다).
 
@@ -357,45 +380,65 @@ present(들어갈 가능성 있는)만 나열한다. 사실상 0%인 성분은 �
 - ASAFOETIDA, LUPIN, GHEE, GOAT_MILK, RYE, BRAZIL_NUT 등은 한식에 거의 없다.
   근거 없이 넣지 마라.
 - 확신 없는 성분은 지어내지 말고 낮은 값으로 두거나 생략하라.
-- 같은 code 를 중복하지 마라.{_feedback_block(feedback)}"""
+- 같은 code 를 중복하지 마라.{{feedback_block}}"""
 
 
-def name_tr_review_prompt(name: str, translations: dict) -> str:
-    return f"""당신은 다국어 번역 검수자입니다. 한국 음식 이름의 번역을 언어별로
+def avoid_gen_prompt(name: str, feedback: str) -> str:
+    return render_prompt(
+        "food-ingredients",
+        AVOID_GEN_TEMPLATE,
+        name=name,
+        candidate_codes=AVOIDANCE_CODES,
+        feedback_block=_feedback_block(feedback),
+    )
+
+
+NAME_TR_REVIEW_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한국 음식 이름의 번역을 언어별로
 0~100점으로 채점하세요. 오역을 잡는 것이 목적입니다:
 - 번역이 이 음식을 제대로 가리키는가 (다른 요리 이름이 되지 않았는가)
 - lang 이 가리키는 언어로 실제로 쓰여 있는가 (아니면 0점)
 
-음식 이름(한국어): {name}
-이름 번역: {json.dumps(translations, ensure_ascii=False)}
+음식 이름(한국어): {{name}}
+이름 번역: {{translations}}
 
-items 배열은 정확히 {len(TARGET_LANGS)}개({LANGS}), 각각 lang·score·reason(한국어 한 문장)."""
+items 배열은 정확히 {{lang_count}}개({{langs}}), 각각 lang·score·reason(한국어 한 문장)."""
 
 
-def desc_review_prompt(name: str, description: str, translations: dict) -> str:
-    return f"""당신은 한국 음식 콘텐츠 검수자입니다. 설명과 설명 번역을 함께 0~100점
+def name_tr_review_prompt(name: str, translations: dict) -> str:
+    return render_prompt(
+        "food-name-translation-review",
+        NAME_TR_REVIEW_TEMPLATE,
+        name=name,
+        translations=json.dumps(translations, ensure_ascii=False),
+        lang_count=len(TARGET_LANGS),
+        langs=LANGS,
+    )
+
+
+DESC_REVIEW_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 설명과 설명 번역을 함께 0~100점
 하나로 채점하세요:
 - 설명이 이 음식을 사실대로 정확히 설명하는가 (없는 재료·다른 음식 조리법 금지)
 - 번역들이 원문과 같은 내용인가, 각 lang 의 언어로 자연스럽게 쓰였는가
 - 하나라도 심각한 문제가 있으면 그 항목 기준으로 낮게 매기세요
 
-음식 이름: {name}
-설명(한국어): {description}
-설명 번역: {json.dumps(translations, ensure_ascii=False)}
+음식 이름: {{name}}
+설명(한국어): {{description}}
+설명 번역: {{translations}}
 
 score(0~100)와 reason(한국어 한 문장, 문제 항목 명시)을 반환하세요."""
 
 
-def judge_prompt(state: dict, thresholds) -> str:
-    scores = {
-        "이름 번역": (state["nt_score"], thresholds.translations),
-        "설명·설명 번역": (state["desc_score"], thresholds.description),
-        "기피성분·매운맛": (state["avoid_score"], thresholds.avoidance),
-    }
-    lines = "\n".join(
-        f"- {field}: {s.score}점 (임계값 {th}) — {s.reason}" for field, (s, th) in scores.items()
+def desc_review_prompt(name: str, description: str, translations: dict) -> str:
+    return render_prompt(
+        "food-description-review",
+        DESC_REVIEW_TEMPLATE,
+        name=name,
+        description=description,
+        translations=json.dumps(translations, ensure_ascii=False),
     )
-    return f"""당신은 한국 음식 콘텐츠의 최종 판정자입니다. 필드별 검수 점수와 사유를 보고
+
+
+JUDGE_TEMPLATE = """당신은 한국 음식 콘텐츠의 최종 판정자입니다. 필드별 검수 점수와 사유를 보고
 이 음식 콘텐츠를 통과(passed=true)시킬지 판정하세요.
 
 원칙:
@@ -404,11 +447,26 @@ def judge_prompt(state: dict, thresholds) -> str:
 - 점수가 임계값을 넘어도 사유에 안전 문제(기피성분 누락 등)가 보이면 탈락시키세요.
 - 애매한 감점(문체·사소한 표현)만으로 임계값 근처에서 탈락시키지는 마세요.
 
-음식 이름: {state["cleaned_name"]}
+음식 이름: {{name}}
 검수 결과:
-{lines}
+{{score_lines}}
 
 reason(한국어 1~2문장), passed, rejected_fields 를 반환하세요."""
+
+
+def judge_prompt(state: dict, thresholds) -> str:
+    scores = {
+        "이름 번역": (state["nt_score"], thresholds.translations),
+        "설명·설명 번역": (state["desc_score"], thresholds.description),
+        "기피성분·매운맛": (state["avoid_score"], thresholds.avoidance),
+    }
+    # 조건·반복이 있는 부분은 코드에서 미리 계산해 변수로 넣는다 — Langfuse 템플릿엔 로직이 없다.
+    lines = "\n".join(
+        f"- {field}: {s.score}점 (임계값 {th}) — {s.reason}" for field, (s, th) in scores.items()
+    )
+    return render_prompt(
+        "food-judge", JUDGE_TEMPLATE, name=state["cleaned_name"], score_lines=lines
+    )
 
 
 def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = None):

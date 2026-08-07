@@ -51,6 +51,14 @@ uv run pytest
 
 Langfuse 키가 `.env`에 있으면 음식 1건 = 트레이스 1개로 자동 기록된다.
 
+## 프롬프트 관리
+
+프롬프트 11개의 소스는 **Langfuse(production 라벨)** 다. UI에서 수정하고 라벨을 옮기면
+코드 배포 없이 반영되고, 라벨을 이전 버전으로 돌리면 롤백이다. 코드의 `*_TEMPLATE` 상수는
+최초 업로드 원본이자 Langfuse 접속 불가 시 폴백이며, `{{candidate_codes}}`·`{{langs}}` 등
+코드 계약이 걸린 값은 변수로 주입되므로 UI에서 편집하지 않는다.
+테스트는 키를 지우고 폴백 경로만 검증한다(`tests/conftest.py`).
+
 ## 남은 이관 작업
 
 - kbap 결과 반영 API 계약 확정 → `content.py` 의 POST 노드 연결

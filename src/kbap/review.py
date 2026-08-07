@@ -119,14 +119,37 @@ TOMATO(토마토) CELERY(셀러리) POTATO(감자) CARROT(당근) ONION(양파) 
 CHIVE(부추) WILD_CHIVE(달래) ASAFOETIDA(흥거) ALCOHOL(알코올) MIRIN(미림) COOKING_WINE(맛술)
 SULFITES(아황산류)"""
 
+# ===== Langfuse 프롬프트 관리 =====
+# 프롬프트의 소스는 Langfuse(production 라벨)다. 아래 *_TEMPLATE 상수는 최초 업로드
+# 원본이자 Langfuse 접속 불가·키 미설정 시 폴백이다. UI에서 수정한 버전은 코드에
+# 반영되지 않으므로 폴백은 "마지막으로 코드에 있던 버전"으로 동작한다.
+#
+# 계약 주의: 후보 코드 목록·언어 목록·structured output 필드명이 걸린 부분은
+# {{candidate_codes}}·{{langs}} 같은 변수로 주입한다 — UI 편집으로 코드 계약이
+# 깨지지 않게 하기 위해서다.
+
+
+def _compile_local(template: str, variables: dict) -> str:
+    for key, value in variables.items():
+        template = template.replace("{{" + key + "}}", str(value))
+    return template
+
+
+def render_prompt(prompt_name: str, template: str, **variables) -> str:
+    """Langfuse production 프롬프트를 가져와 변수를 치환한다. 실패 시 코드 폴백."""
+    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        return _compile_local(template, variables)
+    from langfuse import get_client
+
+    prompt = get_client().get_prompt(prompt_name, label="production", fallback=template)
+    return prompt.compile(**variables)
+
+
 # 형식 검증(글자 수, 9개 언어 존재 여부, spiciness 범위)은 상위 kbap 배치가
 # PENDING_REVIEW로 올리기 전에 끝낸다(Food.needsNameTranslations / assessAvoidance).
-# 여기서 다시 검증하면 모델의 주의력만 분산되고 배치가 보장한 값을 감점할 수 있어 제외한다.
-#
-# 단, 언어 태그와 실제 표기 언어의 일치 여부는 별개다. 배치는 9개 키에 값이 있는지만
-# 보장하므로 태국어 자리에 영어가 들어가도 통과한다. 이는 내용 검증이므로 유지한다.
-_CONTENT_ONLY = """형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
-보지 마세요. 오직 내용이 맞는가만 판단하세요."""
+# 여기서 다시 검증하면 모델의 주의력만 분산되고 배치가 보장한 값을 감점할 수 있어
+# 각 템플릿에 "내용만 판단" 지시를 넣는다. 단, 언어 태그와 실제 표기 언어의 일치는
+# 내용 검증이므로 유지한다.
 
 
 # structured output은 필드 순서대로 생성되므로 reason을 score보다 앞에 둔다. score가
@@ -147,11 +170,11 @@ class TranslationScores(BaseModel):
     items: list[TranslationLangScore]
 
 
-def description_prompt(food: dict) -> str:
-    return f"""당신은 한국 음식 콘텐츠 검수자입니다. 아래 음식 설명이 외국인 관광객에게
+REVIEW_DESCRIPTION_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 아래 음식 설명이 외국인 관광객에게
 제공하기에 적합한지 0~100점으로 채점하세요.
 
-{_CONTENT_ONLY}
+형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
+보지 마세요. 오직 내용이 맞는가만 판단하세요.
 
 채점 기준:
 - 설명이 실제로 이 음식을 정확히 설명하는가 (다른 음식 설명이 아닌가)
@@ -159,17 +182,26 @@ def description_prompt(food: dict) -> str:
   조리법을 다른 음식의 것과 섞지 않았는가)
 - 이 음식을 처음 보는 외국인이 읽고 무슨 음식인지 그려지는가
 
-음식 이름: {food["koreanName"]}
-설명: {food["description"]}
+음식 이름: {{name}}
+설명: {{description}}
 
 score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
 
 
-def translations_prompt(food: dict) -> str:
-    return f"""당신은 다국어 번역 검수자입니다. 한국 음식의 이름·설명 번역을 언어별로
+def description_prompt(food: dict) -> str:
+    return render_prompt(
+        "food-review-description",
+        REVIEW_DESCRIPTION_TEMPLATE,
+        name=food["koreanName"],
+        description=food["description"],
+    )
+
+
+REVIEW_TRANSLATIONS_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한국 음식의 이름·설명 번역을 언어별로
 0~100점으로 채점하세요.
 
-{_CONTENT_ONLY}
+형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
+보지 마세요. 오직 내용이 맞는가만 판단하세요.
 
 채점 기준 (언어별로 각각) — 오역을 잡는 것이 목적입니다:
 - 이름 번역이 이 음식을 제대로 가리키는가. 글자만 옮겨 뜻이 달라지지 않았는가
@@ -179,27 +211,40 @@ def translations_prompt(food: dict) -> str:
 - 그 언어 화자가 읽었을 때 말이 되는가 (기계번역 티가 나는 어색한 직역인가)
 - lang 이 가리키는 언어로 실제로 쓰여 있는가 (예: th 자리에 영어가 들어가 있으면 0점)
 
-음식 이름(한국어): {food["koreanName"]}
-설명(한국어): {food["description"]}
-이름 번역: {json.dumps(food["nameTranslations"], ensure_ascii=False)}
-설명 번역: {json.dumps(food["descriptionTranslations"], ensure_ascii=False)}
+음식 이름(한국어): {{name}}
+설명(한국어): {{description}}
+이름 번역: {{name_translations}}
+설명 번역: {{description_translations}}
 
 출력 규칙 — 반드시 지키세요:
-- items 배열은 **정확히 {len(TARGET_LANGS)}개** 항목이어야 합니다. 하나라도 빠지면 안 됩니다.
-- 아래 순서 그대로, 이 lang 값을 문자 그대로 사용하세요: {", ".join(TARGET_LANGS)}
+- items 배열은 **정확히 {{lang_count}}개** 항목이어야 합니다. 하나라도 빠지면 안 됩니다.
+- 아래 순서 그대로, 이 lang 값을 문자 그대로 사용하세요: {{langs}}
 - 여러 언어를 한 항목으로 합치거나, 점수가 같다는 이유로 생략하지 마세요.
-  점수가 같아도 {len(TARGET_LANGS)}개를 각각 적으세요.
+  점수가 같아도 {{lang_count}}개를 각각 적으세요.
 - 판단이 어려운 언어도 건너뛰지 말고, 확신이 없으면 낮은 점수를 주세요.
   빠뜨린 언어는 0점으로 간주되어 멀쩡한 번역까지 폐기됩니다.
 
 각 항목은 lang, score(0~100), reason(한국어 한 문장)입니다."""
 
 
-def avoidance_prompt(food: dict) -> str:
-    return f"""당신은 식품 안전 검수자입니다. 아래 음식의 기피성분 목록과 매운맛 등급이
+def translations_prompt(food: dict) -> str:
+    return render_prompt(
+        "food-review-translations",
+        REVIEW_TRANSLATIONS_TEMPLATE,
+        name=food["koreanName"],
+        description=food["description"],
+        name_translations=json.dumps(food["nameTranslations"], ensure_ascii=False),
+        description_translations=json.dumps(food["descriptionTranslations"], ensure_ascii=False),
+        lang_count=len(TARGET_LANGS),
+        langs=", ".join(TARGET_LANGS),
+    )
+
+
+REVIEW_AVOIDANCE_TEMPLATE = """당신은 식품 안전 검수자입니다. 아래 음식의 기피성분 목록과 매운맛 등급이
 일반적인 레시피 기준으로 타당한지 0~100점으로 채점하세요.
 
-{_CONTENT_ONLY}
+형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
+보지 마세요. 오직 내용이 맞는가만 판단하세요.
 
 # inclusionPercent 의 의미 (생성 규격)
 "손님이 아무 식당에서나 이 메뉴를 시켰을 때, 그 한 접시에 이 성분이 들어 있을 확률."
@@ -213,7 +258,7 @@ def avoidance_prompt(food: dict) -> str:
 체감이 아니라 이 척도 기준으로 어긋날 때만 감점하세요.
 
 # 후보 성분 코드 (생성기가 고를 수 있는 전체 목록)
-{AVOIDANCE_CODES}
+{{candidate_codes}}
 이 목록에 없는 성분(김치·고춧가루·된장 등)은 애초에 표기할 수 없습니다.
 목록 밖 성분이 빠졌다는 이유로 절대 감점하지 마세요.
 
@@ -231,11 +276,24 @@ def avoidance_prompt(food: dict) -> str:
 특정 브랜드·식당 레시피가 아니라 한국 음식의 일반적인 레시피를 기준으로 판단합니다.
 관광객이 먹을 수 있는 음식인지, 알레르기·비건·종교 안전에 문제가 없는지 판단하는 것이 목적입니다.
 
-음식 이름: {food["koreanName"]}
-기피성분 목록: {json.dumps(food["avoidanceSubstances"], ensure_ascii=False)}
-매운맛 등급: {food["spiciness"]}
+음식 이름: {{name}}
+기피성분 목록: {{ingredients}}
+매운맛 등급: {{spiciness}}
 
 score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
+
+
+def avoidance_prompt(food: dict) -> str:
+    # 명칭 규약: 프롬프트·변수는 ingredients — 음식 입장에선 재료, 사용자 입장에선 기피 재료.
+    # 파이썬 식별자·kbap 필드(avoidanceSubstances)는 Spring enum 계약이라 그대로 둔다.
+    return render_prompt(
+        "food-review-ingredients",
+        REVIEW_AVOIDANCE_TEMPLATE,
+        name=food["koreanName"],
+        ingredients=json.dumps(food["avoidanceSubstances"], ensure_ascii=False),
+        spiciness=food["spiciness"],
+        candidate_codes=AVOIDANCE_CODES,
+    )
 
 
 def lang_scores(result: TranslationScores) -> dict[str, FieldScore]:
