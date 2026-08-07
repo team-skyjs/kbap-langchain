@@ -310,6 +310,17 @@ async def test_partial_failure_reports_only_failed_message():
     assert failures == ["m2"]
 
 
+async def test_name_only_message_is_processed():
+    # DB 저장 전에는 foodId 없이 이름만 발행된다 — 계약 위반이 아니다.
+    graph = FakeGraph()
+    event = {"Records": [{"messageId": "m1", "body": json.dumps({"scannedName": "김치찌개"})}]}
+
+    failures = await process_event(event, graph, concurrency=20)
+
+    assert failures == []
+    assert graph.calls == ["김치찌개"]
+
+
 async def test_malformed_body_is_reported_as_failure():
     # 계약 위반 메시지는 버리지 않고 실패로 보고해 DLQ로 보낸다.
     graph = FakeGraph()

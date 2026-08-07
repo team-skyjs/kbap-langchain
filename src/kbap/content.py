@@ -8,7 +8,8 @@ kbap(Spring) 콘텐츠 배치가 하던 생성·검수를 이 그래프가 전�
 생성 프롬프트는 kbap(Spring) infra/llm/food 운영 프롬프트를 옮긴 것이다.
 원본이 바뀌면 여기도 맞춘다. JSON 형식 지시는 structured output이 대신한다.
 
-SQS 메시지 계약(초안): body = {"foodId": <int>, "scannedName": <str>}
+SQS 메시지 계약(초안): body = {"scannedName": <str>, "foodId": <int, 선택>}
+foodId 는 DB 저장 후 발행하는 경우에만 실린다 — 없으면 이름이 식별자.
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
 from collections.abc import Awaitable, Callable
@@ -525,7 +526,8 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
         message_id = record["messageId"]
         try:
             body = json.loads(record["body"])
-            food_id, name = body["foodId"], body["scannedName"]
+            # foodId 는 DB 저장 전이라 아직 없을 수 있다 — 이름이 처리 단위의 식별자다.
+            food_id, name = body.get("foodId"), body["scannedName"]
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             log.warning("계약 위반 메시지 %s: %s", message_id, e)
             return message_id
