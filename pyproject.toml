@@ -13,7 +13,7 @@ dependencies = [
     "langfuse>=3.0",
     "python-dotenv>=1.2.2",
     "langchain-openai>=1.4.1",
-    "langchain-qdrant>=1.1.0",
+    "qdrant-client[fastembed]>=1.19.0",
 ]
 
 [dependency-groups]
