@@ -3,6 +3,8 @@
 # 1회성 작업(ECR 리포 생성, Lambda 함수 생성, SQS 트리거 연결)은 콘솔에서 한다.
 set -euo pipefail
 
+# 118178010621 계정 자격증명 (로컬 default 프로필은 다른 계정이다)
+export AWS_PROFILE="${AWS_PROFILE:-kbap-prod-deployer}"
 REGION=ap-northeast-2
 ACCOUNT=118178010621
 REPO=kbap/langchain
