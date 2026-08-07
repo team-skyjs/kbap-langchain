@@ -232,7 +232,9 @@ class DescGen(BaseModel):
     @field_validator("description")
     @classmethod
     def _not_blank_or_placeholder(cls, v: str) -> str:
-        if not v.strip() or v.strip() == "설명 준비 중":
+        # 마침표 금지는 프롬프트로 지시하되, 모델이 어겨도 재생성 대신 잘라낸다(콘텐츠 정책).
+        v = v.strip().rstrip(".")
+        if not v or v == "설명 준비 중":
             raise ValueError("설명은 비거나 플레이스홀더일 수 없다")
         return v
 

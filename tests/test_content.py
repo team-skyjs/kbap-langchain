@@ -187,6 +187,13 @@ def test_desc_gen_rejects_blank_and_placeholder():
         DescGen(description="설명 준비 중")
 
 
+def test_desc_gen_strips_trailing_period():
+    # 마침표 금지는 콘텐츠 정책 — 모델이 붙여도 재생성 없이 잘라낸다.
+    assert DescGen(description="치즈를 넣어 튀긴 사이드 메뉴.").description == "치즈를 넣어 튀긴 사이드 메뉴"
+    with pytest.raises(ValidationError):
+        DescGen(description="...")  # 마침표뿐인 설명은 빈 값으로 취급
+
+
 def test_translations_require_all_nine_languages():
     full = [{"lang": lang, "text": "t"} for lang in TARGET_LANGS]
     assert len(Translations(reason="ok", items=full).items) == 9
