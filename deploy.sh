@@ -3,8 +3,11 @@
 # 1회성 작업(ECR 리포 생성, Lambda 함수 생성, SQS 트리거 연결)은 콘솔에서 한다.
 set -euo pipefail
 
-# 배포 전용 최소권한 유저 (로컬 default 프로필은 다른 계정이다)
-export AWS_PROFILE="${AWS_PROFILE:-kbap-lambda-deployer}"
+# 로컬: 배포 전용 최소권한 유저 프로필 (default 프로필은 다른 계정이다).
+# CI(GitHub Actions): 프로필 없이 env 자격증명(AWS_ACCESS_KEY_ID 등)을 쓴다.
+if [ -z "${CI:-}" ]; then
+  export AWS_PROFILE="${AWS_PROFILE:-kbap-lambda-deployer}"
+fi
 REGION=ap-northeast-2
 ACCOUNT=118178010621
 REPO=kbap/langchain

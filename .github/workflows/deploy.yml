@@ -1,0 +1,31 @@
+# main 머지 시 Lambda 배포 — 로직은 deploy.sh 하나가 소유하고 여기서는 러너 준비만 한다.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false # 배포 중단은 반쪽 push를 남길 수 있어 순차 실행
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # x86 러너에서 arm64 이미지를 빌드하기 위한 에뮬레이션.
+      # setup-buildx(docker-container 드라이버)는 쓰지 않는다 — 빌드 결과가 데몬에
+      # 남지 않아 deploy.sh 의 docker push 가 이미지를 못 찾는다.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      - run: ./deploy.sh
