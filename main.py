@@ -3,7 +3,7 @@
   uv run python main.py review  --limit 50 [--dry-run] [--config config.yaml]
   uv run python main.py namefix --input names.json [--anchors anchors.json] [--output out.json]
 
-Lambda(SQS batchSize 10 소비)는 main.handler 를 진입점으로 잡는다.
+Lambda는 SQS 메시지를 batchSize 10으로 소비하며 main.handler를 진입점으로 사용한다.
 """
 
 import argparse
@@ -14,7 +14,7 @@ import os
 
 import yaml
 
-from kbap.content import handler  # noqa: F401 — Lambda 진입점 re-export
+from kbap.content import handler  # noqa: F401 — Lambda 진입점으로 다시 내보냄
 
 log = logging.getLogger("kbap")
 
@@ -55,14 +55,14 @@ async def _namefix(args) -> None:
     from kbap.namefix import clean_batch, make_normalizer
     from kbap.review import make_callbacks
 
-    # LLM API 키 로드 — kbap_review.config.load_config 와 같은 환경 경계(override=False).
+    # LLM API 키 로드 — kbap_review.config.load_config와 같은 환경 경계(override=False).
     load_dotenv()
     with open(args.config) as f:
         raw = yaml.safe_load(f)
     llm = raw["llm"]
     concurrency = raw["concurrency"]
     if concurrency < 1:
-        # Semaphore(0) 은 모든 코루틴을 영구히 막아 배치가 조용히 멈춘다.
+        # Semaphore(0)은 모든 코루틴을 영구히 막아 배치가 조용히 멈춘다.
         raise SystemExit("concurrency 는 1 이상이어야 합니다")
 
     names = _load_names(args.input)
@@ -81,7 +81,7 @@ async def _namefix(args) -> None:
         if r["method"] != "unchanged":
             log.info("%s %r -> %r %s", r["method"], r["original"], r["name"], r["reason"])
 
-    # 임시 파일에 쓴 뒤 원자적 교체 — 중단돼도 깨진 JSON 이나 유실된 이전 결과를 남기지 않는다.
+    # 임시 파일에 쓴 뒤 원자적으로 교체해, 중단돼도 깨진 JSON이나 유실된 이전 결과를 남기지 않는다.
     tmp = args.output + ".tmp"
     with open(tmp, "w") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
@@ -93,7 +93,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="kbap 관리자 배치 모음")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    review = sub.add_parser("review", help="KB-286 food 최종 검수 배치")
+    review = sub.add_parser("review", help="food 최종 검수 배치")
     review.add_argument("--limit", type=int, default=50)
     review.add_argument("--dry-run", action="store_true", help="kbap에 결과를 반영하지 않고 판정만 출력")
     review.add_argument("--config", default="config.yaml")

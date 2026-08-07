@@ -1,4 +1,4 @@
-"""검수 도메인(kbap.review) — 설정·클라이언트·프롬프트·판정·그래프·러너."""
+"""검수 도메인(kbap.review) — 설정·클라이언트·프롬프트·판정·그래프·실행기."""
 
 import json
 import textwrap
@@ -134,14 +134,14 @@ OK_THRESHOLDS = "  description: 70\n  translations: 70\n  avoidance: 70\n"
 
 
 def test_rejects_nonpositive_concurrency(tmp_path, monkeypatch):
-    # Semaphore(0) 은 모든 코루틴을 영구히 막아 무인 배치가 조용히 멈춘다.
+    # Semaphore(0)은 모든 코루틴을 영구히 막아 무인 배치가 조용히 멈춘다.
     monkeypatch.setenv("KBAP_API_TOKEN", "t")
     with pytest.raises(ValidationError):
         load_config(_write(tmp_path, OK_THRESHOLDS, 0))
 
 
 def test_rejects_threshold_outside_score_range(tmp_path, monkeypatch):
-    # 음수면 전부 통과, 100 초과면 전부 탈락한다.
+    # 임계값이 음수면 모두 통과하고 100을 초과하면 모두 탈락한다.
     monkeypatch.setenv("KBAP_API_TOKEN", "t")
     with pytest.raises(ValidationError):
         load_config(_write(tmp_path, "  description: -1\n  translations: 70\n  avoidance: 70\n", 5))
@@ -197,7 +197,7 @@ async def test_post_passed_result():
 
     assert applied == {"foodId": 7, "contentStatus": "REVIEWED"}
     assert captured["path"] == f"{PATH}/7"
-    # 통과 결과에는 rejectedFields·reason 을 보내지 않는다.
+    # 통과 결과에는 rejectedFields와 reason을 보내지 않는다.
     assert captured["body"] == {"passed": True}
 
 
@@ -295,19 +295,19 @@ def test_avoidance_prompt_contains_substances_and_spiciness():
 
 
 def test_avoidance_prompt_carries_generator_contract():
-    """생성기(SpringAiFoodAvoidanceAssessmentClient)와 같은 척도·후보 목록을 실어야 한다.
+    """생성기(SpringAiFoodAvoidanceAssessmentClient)와 같은 척도·후보 목록을 포함해야 한다.
 
-    이게 빠지면 검수기가 제 감각으로 판단해, 규격대로 생성된 데이터를 깎고(매운맛 척도 불일치)
-    후보에 없어 넣을 수 없던 성분을 누락으로 감점한다 — 스모크에서 실제로 나온 실패.
+    이를 빼면 검수기가 임의로 판단해 규격대로 생성된 데이터를 감점하고(매운맛 척도 불일치),
+    후보에 없어 넣지 못한 성분도 누락으로 감점한다. 스모크 테스트에서 실제로 발생한 실패다.
     """
     p = avoidance_prompt(PROMPT_FOOD)
     assert AVOIDANCE_CODES in p
-    assert "1~3 약간 매콤" in p  # 생성기 척도. 없으면 김치찌개 3점을 "너무 낮다"고 깎는다.
+    assert "1~3 약간 매콤" in p  # 생성기 척도이며, 없으면 김치찌개 3점을 "너무 낮다"며 감점한다.
     assert "양(量)이 아니라 포함 여부의 확률" in p
 
 
 def test_field_score_puts_reason_before_score():
-    """structured output 은 필드 순서대로 생성된다 — 근거가 점수보다 먼저 나와야 한다."""
+    """structured output은 필드 순서대로 생성되므로 근거가 점수보다 먼저 나와야 한다."""
     assert list(FieldScore.model_fields) == ["reason", "score"]
 
 
@@ -364,7 +364,7 @@ def test_description_fail_maps_to_kbap_field():
 
 
 def test_one_failing_language_rejects_both_translation_fields():
-    # 배치가 이름·설명 번역을 통짜로 재생성하므로 언어 하나만 나빠도 둘 다 비운다.
+    # 배치는 이름·설명 번역을 한꺼번에 재생성하므로 언어 하나만 나빠도 둘 다 비운다.
     translations = all_pass_translations() | {"th": fs(30, "태국어 번역이 다른 음식을 지칭")}
     v = decide(fs(90), translations, fs(90), TH)
     assert v.passed is False
@@ -372,14 +372,14 @@ def test_one_failing_language_rejects_both_translation_fields():
 
 
 def test_avoidance_fail_clears_spiciness_too():
-    # spiciness 는 기피성분과 한 번에 산출되므로 함께 비운다.
+    # spiciness는 기피성분과 한 번에 산출되므로 함께 비운다.
     v = decide(fs(90), all_pass_translations(), fs(40, "돼지고기 누락"), TH)
     assert v.passed is False
     assert v.rejected_fields == ["AVOIDANCE_SUBSTANCES", "SPICINESS"]
 
 
 def test_incomplete_translation_map_does_not_pass():
-    # 언어가 빠진 채로 들어와도 통과시키지 않는다(fail-closed).
+    # 언어가 누락된 채 전달되어도 통과시키지 않는다(fail-closed).
     v = decide(fs(90), {"en": fs(90)}, fs(90), TH)
     assert v.passed is False
     assert "NAME_TRANSLATIONS" in v.rejected_fields
@@ -400,7 +400,7 @@ def test_reason_capped():
 
 
 def test_reason_keeps_description_and_avoidance_when_many_langs_fail():
-    # 단일 줄 그룹(설명·기피성분)은 언어 줄보다 먼저 들어가 잘리지 않는다.
+    # 한 줄짜리 그룹(설명·기피성분)은 언어별 사유보다 앞에 배치해 잘리지 않게 한다.
     translations = {lang: fs(10, "사" * 300) for lang in TARGET_LANGS}
     v = decide(fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
     assert "설명 문제" in v.reason
@@ -479,7 +479,7 @@ async def test_dry_run_does_not_post():
 
 
 async def test_scorer_exception_propagates():
-    # LLM 실패는 그래프 실행 실패로 전파 — 실행기가 보류 처리 (POST 없음)
+    # LLM 실패는 그래프 실행 실패로 전파되며 실행기가 보류 처리한다(POST 없음)
     async def boom(food):
         raise RuntimeError("LLM down")
 
@@ -493,8 +493,8 @@ async def test_scorer_exception_propagates():
 
 
 async def test_parse_failure_is_retried():
-    # structured output 파싱 실패는 ValueError 하위라 LangGraph 기본 정책이 제외한다.
-    # retry_on 을 덮어썼으므로 두 번 시도돼야 한다.
+    # structured output 파싱 실패는 ValueError 하위이므로 LangGraph 기본 정책에서 제외된다.
+    # retry_on을 재정의했으므로 두 번 시도해야 한다.
     from langchain_core.exceptions import OutputParserException
 
     calls = 0
@@ -514,7 +514,7 @@ async def test_parse_failure_is_retried():
     assert client.posts == []
 
 
-# ===== 러너(run_batch) =====
+# ===== 실행기(run_batch) =====
 
 
 class CountingClient:
@@ -554,7 +554,7 @@ async def test_run_batch_counts_and_isolates_failures():
 
     counts = await run_batch(graph, foods, concurrency=2, callbacks=[])
 
-    # foodId=2 는 LLM 실패 → 보류(HELD), POST 없음. 나머지는 PASS + POST.
+    # foodId=2는 LLM 실패로 보류(HELD)되며 POST하지 않는다. 나머지는 PASS한 뒤 POST한다.
     assert counts == {"PASS": 2, "FAIL": 0, "HELD": 1}
     assert sorted(client.posts) == [1, 3]
 
@@ -570,13 +570,13 @@ async def test_run_batch_counts_all_outcomes():
 
     counts = await run_batch(graph, foods, concurrency=2, callbacks=[])
 
-    # 탈락 건이 재생성으로 갈지 REVIEW_REJECTED 로 갈지는 kbap 이 정하므로 여기선 FAIL 하나로 센다.
+    # 탈락 건을 재생성으로 보낼지 REVIEW_REJECTED로 보낼지는 kbap이 정하므로 여기서는 FAIL로 센다.
     assert counts == {"PASS": 1, "FAIL": 1, "HELD": 1}
     assert sorted(client.posts) == [1, 3]
 
 
 async def test_run_batch_missing_food_id_is_held():
-    # kbap 응답에 foodId 가 없으면(계약 위반) 조용히 넘어가지 않고 보류로 떨어진다.
+    # kbap 응답에 foodId가 없으면 계약 위반으로 간주하고 보류 처리한다.
     client = CountingClient()
     graph = build_graph(scorers_failing_for(bad_id=None), client, TH)
     foods = [{"koreanName": "떡볶이", "contentReviewAttempts": 0}]

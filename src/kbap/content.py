@@ -1,10 +1,10 @@
-"""이름 정제 → 생성 3갈래 → 검수 → 종합판정 콘텐츠 그래프 + SQS Lambda 핸들러.
+"""이름 정제 → 3개 분기 생성 → 검수 → 종합 판정 콘텐츠 그래프와 SQS Lambda 핸들러.
 
-생성 프롬프트는 kbap(Spring) infra/llm/food 운영 프롬프트의 이식본이다 —
-원본이 바뀌면 여기도 맞출 것. JSON 형식 지시는 structured output 이 대체한다.
+생성 프롬프트는 kbap(Spring) infra/llm/food 운영 프롬프트를 옮긴 것이다.
+원본이 바뀌면 여기도 맞춘다. JSON 형식 지시는 structured output이 대신한다.
 
 SQS 메시지 계약(초안): body = {"foodId": <int>, "scannedName": <str>}
-부분 실패 보고(ReportBatchItemFailures) 활성화가 전제다."""
+부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple, TypedDict
@@ -71,51 +71,51 @@ class ContentState(TypedDict, total=False):
 
 
 def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2):
-    """max_attempts=2 → 최초 1회 + 재시도 1회. 그 뒤에는 실패 점수·사유를 안고 판정으로 간다."""
+    """max_attempts=2이면 최초 호출 1회와 재시도 1회 후 실패 점수·사유를 담아 판정한다."""
 
-    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 걷어낸 이름이 모든 후속 노드의 입력이 된다
+    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다
     async def clean_name(state: ContentState):
         fix = await fns.clean_name(state["food_name"])
         return {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
 
-    # ② 이름 번역 생성 (갈래 1) — 9개 언어. 재시도면 검수 탈락 사유(nt_feedback)를 프롬프트에 싣는다
+    # ② 이름 번역 생성(분기 1) — 9개 언어. 재시도 시 탈락 사유(nt_feedback)를 프롬프트에 넣는다
     async def gen_name_tr(state: ContentState):
         tr = await fns.gen_name_tr(state["cleaned_name"], state.get("nt_feedback", ""))
         return {"name_translations": tr, "nt_attempts": state.get("nt_attempts", 0) + 1}
 
-    # 이름 번역 검수 — 언어별 채점 후 최저점 기준. 탈락 사유는 재생성 피드백으로 저장
+    # 이름 번역 검수 — 언어별 점수 중 최저점을 적용하고 탈락 사유를 재생성 피드백으로 저장한다
     async def rev_name_tr(state: ContentState):
         score = await fns.rev_name_tr(state["cleaned_name"], state["name_translations"])
         return {"nt_score": score, "nt_feedback": score.reason}
 
-    # ③ 한국어 설명 생성 (갈래 2 시작) — 한 문장·255자 이하
+    # ③ 한국어 설명 생성(분기 2 시작) — 한 문장, 255자 이하
     async def gen_desc(state: ContentState):
         desc = await fns.gen_desc(state["cleaned_name"], state.get("desc_feedback", ""))
         return {"description": desc, "desc_attempts": state.get("desc_attempts", 0) + 1}
 
-    # 설명 번역 생성 (갈래 2 후속) — 설명이 재생성되면 여기도 항상 다시 돈다
+    # 설명 번역 생성(분기 2 후속) — 설명을 재생성할 때마다 번역도 다시 생성한다
     async def gen_desc_tr(state: ContentState):
         tr = await fns.gen_desc_tr(state["cleaned_name"], state["description"])
         return {"description_translations": tr}
 
-    # 설명·설명 번역 검수 — 내용 사실성과 번역 품질을 한 점수로 판정
+    # 설명·설명 번역 검수 — 내용의 사실성과 번역 품질을 하나의 점수로 판정한다
     async def rev_desc(state: ContentState):
         score = await fns.rev_desc(
             state["cleaned_name"], state["description"], state["description_translations"]
         )
         return {"desc_score": score, "desc_feedback": score.reason}
 
-    # ④ 기피성분·매운맛 생성 (갈래 3) — 81종 후보 내 선택, 후보 밖 코드는 저장 전 필터
+    # ④ 기피성분·매운맛 생성(분기 3) — 81종 후보에서 선택하고 후보 밖 코드는 저장 전에 거른다
     async def gen_avoid(state: ContentState):
         avoid = await fns.gen_avoid(state["cleaned_name"], state.get("avoid_feedback", ""))
         return {"avoidance": avoid, "avoid_attempts": state.get("avoid_attempts", 0) + 1}
 
-    # 기피성분·매운맛 검수 — 주요 성분 누락(안전 직결)을 최우선으로 감점
+    # 기피성분·매운맛 검수 — 안전과 직결된 주요 성분 누락을 최우선으로 감점한다
     async def rev_avoid(state: ContentState):
         score = await fns.rev_avoid(state["cleaned_name"], state["avoidance"])
         return {"avoid_score": score, "avoid_feedback": score.reason}
 
-    # ⑤ 종합판정 — 세 갈래가 전부 끝난 뒤(defer) 점수·사유를 보고 PASS/FAIL 최종 결정
+    # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다
     async def judge(state: ContentState):
         return {"verdict": await fns.judge(dict(state))}
 
@@ -128,7 +128,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
 
         return route
 
-    # structured output 파싱 실패 재시도 — kbap_review.graph 와 같은 이유(전부 LLM 노드).
+    # structured output 파싱 실패 시 재시도 — kbap_review.graph와 같은 이유이며 모두 LLM 노드다.
     retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ContentState)
     g.add_node("clean_name", clean_name, retry_policy=retry)
@@ -139,7 +139,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_node("rev_desc", rev_desc, retry_policy=retry)
     g.add_node("gen_avoid", gen_avoid, retry_policy=retry)
     g.add_node("rev_avoid", rev_avoid, retry_policy=retry)
-    # defer=True — 세 갈래가 서로 다른 횟수로 재시도해도, 전부 끝난 뒤 정확히 한 번 실행된다.
+    # defer=True — 세 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다.
     g.add_node("judge", judge, defer=True, retry_policy=retry)
 
     g.add_edge(START, "clean_name")
@@ -147,7 +147,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_edge("clean_name", "gen_desc")
     g.add_edge("clean_name", "gen_avoid")
     g.add_edge("gen_name_tr", "rev_name_tr")
-    g.add_edge("gen_desc", "gen_desc_tr")  # 설명 재생성 시 번역도 같이 다시 만든다
+    g.add_edge("gen_desc", "gen_desc_tr")  # 설명을 재생성하면 번역도 함께 다시 만든다
     g.add_edge("gen_desc_tr", "rev_desc")
     g.add_edge("gen_avoid", "rev_avoid")
     g.add_conditional_edges(
@@ -172,7 +172,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
 LANGS = ", ".join(TARGET_LANGS)
 
 
-# reason 을 결과보다 앞에 둔다 — scoring.FieldScore 와 같은 교훈(근거를 먼저 세우게 한다).
+# scoring.FieldScore와 같은 이유로 reason을 결과보다 앞에 두어 근거를 먼저 세우게 한다.
 class TranslationItem(BaseModel):
     lang: str
     text: str
@@ -198,8 +198,8 @@ class DescGen(BaseModel):
     description: str
 
 
-# 모델 응답에서 후보 밖 코드를 저장 전에 걸러낸다 — kbap KB-236(후보 밖 코드 유출) 방어를
-# 프롬프트에만 맡기지 않는다. 중복 코드는 첫 값만 남긴다.
+# 과거 모델이 후보 밖 코드를 반환한 사례가 있어 저장 전에 걸러내며, 프롬프트에만 의존하지 않는다.
+# 중복 코드는 첫 번째 값만 남긴다.
 _CODE = re.compile(r"([A-Z_]+)\(")
 VALID_CODES = frozenset(_CODE.findall(AVOIDANCE_CODES))
 
@@ -407,7 +407,7 @@ reason(한국어 1~2문장), passed, rejected_fields 를 반환하세요."""
 
 
 def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = None):
-    """실 LLM 기반 노드 세트. import 를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
+    """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다."""
     from kbap.namefix import clean_one, make_normalizer
     from kbap.review import init_model
 
@@ -421,7 +421,7 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
     normalize = make_normalizer(model, timeout, callbacks=[])
 
     async def clean_name(name: str) -> dict:
-        # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정 음식명을 앵커로 주입
+        # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정된 음식명을 앵커로 주입
         return await clean_one(name, [], normalize)
 
     async def gen_name_tr(name: str, feedback: str) -> dict:
@@ -437,8 +437,8 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
         return {i.lang: i.text for i in result.items}
 
     async def gen_avoid(name: str, feedback: str) -> dict:
-        # ponytail: 단일 모델 — kbap 은 다중 모델 fanout+minAgreement(2)로 종합한다.
-        # 안전 데이터 정확도가 아쉬우면 그 합의 구조(또는 web_search 도구)를 이식할 것.
+        # ponytail: 단일 모델 — kbap은 여러 모델의 fan-out 결과를 minAgreement(2)로 종합한다.
+        # 안전 데이터의 정확도가 부족하면 해당 합의 구조나 web_search 도구를 이식한다.
         result: AvoidanceGen = await avoid_llm.ainvoke(avoid_gen_prompt(name, feedback))
         return {
             "substances": valid_substances([i.model_dump() for i in result.items]),
@@ -449,7 +449,7 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
         result: TranslationScores = await tr_score_llm.ainvoke(
             name_tr_review_prompt(name, translations)
         )
-        scores = lang_scores(result)  # 누락 언어 0점 fail-closed 재사용
+        scores = lang_scores(result)  # 누락 언어를 0점으로 채우는 fail-closed 로직 재사용
         worst = min(scores.values(), key=lambda s: s.score)
         failing = [f"{lang} {s.score}점: {s.reason}" for lang, s in scores.items() if s.score < 100]
         return FieldScore(score=worst.score, reason="; ".join(failing) or "이상 없음")
@@ -487,7 +487,7 @@ _graph = None
 
 
 def _load_graph():
-    """콜드스타트 1회만 그래프를 만든다."""
+    """콜드 스타트 시 그래프를 한 번만 만든다."""
     global _graph
     if _graph is None:
         from dotenv import load_dotenv
@@ -508,7 +508,7 @@ def _load_graph():
 
 
 async def process_event(event: dict, graph, concurrency: int, callbacks: list = []) -> list[str]:
-    """레코드들을 동시 처리하고 실패한 messageId 목록을 돌려준다."""
+    """레코드를 동시에 처리하고 실패한 messageId 목록을 반환한다."""
     sem = asyncio.Semaphore(concurrency)
 
     async def one(record: dict) -> str | None:
@@ -528,7 +528,7 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
                 return message_id
         verdict = result["verdict"]
-        # TODO(kbap 계약 확정 시): PASS/FAIL + 사유를 결과 반영 API 로 POST — 멱등이어야 한다.
+        # TODO(kbap 계약 확정 시): PASS/FAIL과 사유를 결과 반영 API로 POST — 멱등성을 보장해야 한다.
         log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
         return None
 
@@ -541,7 +541,7 @@ def handler(event, context):
     concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
     failed = asyncio.run(process_event(event, graph, concurrency, make_callbacks()))
 
-    # Lambda 는 리턴 후 프로세스를 얼린다 — atexit 이 안 불리므로 여기서 직접 flush.
+    # Lambda는 응답 반환 후 프로세스를 멈추므로 atexit이 호출되지 않아 여기서 직접 flush한다.
     from langfuse import get_client
 
     get_client().flush()

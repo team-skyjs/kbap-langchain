@@ -9,35 +9,35 @@ import unicodedata
 from pydantic import BaseModel
 
 
-# reason 을 corrected 보다 앞에 둔다 — structured output 은 필드 순서대로 생성되므로
-# 모델이 근거를 세운 뒤 교정명을 뱉게 한다(scoring.FieldScore 와 같은 교훈).
+# structured output은 필드 순서대로 생성되므로 reason을 corrected보다 앞에 둔다.
+# 모델이 근거를 먼저 세운 뒤 교정명을 생성하게 한다(scoring.FieldScore와 같은 이유).
 class NameFix(BaseModel):
     reason: str
     corrected: str
 
 
 def _jamo(s: str) -> str:
-    # NFD 정규화가 한글 음절을 자모로 분해한다 — "김치찌게"와 "김치찌개"의 차이가
-    # 음절 1글자가 아니라 자모 1글자가 되어 OCR 오타에 훨씬 민감하게 반응한다.
+    # NFD 정규화로 한글 음절을 자모로 분해하면 "김치찌게"와 "김치찌개"의 차이가
+    # 음절 1자가 아닌 자모 1자가 되어 OCR 오타를 더 세밀하게 감지할 수 있다.
     return unicodedata.normalize("NFD", s)
 
 
 def _jamo_edits(a: str, b: str) -> int:
-    """자모 삽입+삭제 수. 치환 1자모 = 삭제+삽입 = 2."""
+    """자모 삽입·삭제 횟수. 자모 치환 1회는 삭제 1회와 삽입 1회로 계산하므로 결과는 2다."""
     matches = sum(bl.size for bl in difflib.SequenceMatcher(None, a, b).get_matching_blocks())
     return len(a) + len(b) - 2 * matches
 
 
 def snap(name: str, anchors: list[str], max_edits: int = 2) -> str | None:
-    """자모 편집 수로 앵커(기수집 확정 음식명)에 스냅. 예산 초과·동률이면 None.
+    """자모 편집 횟수로 앵커(이미 수집해 확정한 음식명)에 스냅한다. 예산 초과·동률이면 None.
 
-    비율(ratio)이 아니라 절대 편집 수를 쓴다 — 비율 기준은 공유 접두어가 길면
+    비율(ratio)이 아닌 절대 편집 횟수를 사용한다. 비율 기준은 공통 접두사가 길면
     "왕김치찌개"→"김치찌개"(수식어 삭제), "돼지고기 김치찜"→"돼지고기 김치찌개"(다른 요리)
-    까지 통과시킨다. OCR 오타는 길이와 무관하게 1~2자모라 예산 2가 정확히 가른다.
+    까지 통과시킨다. OCR 오타는 이름 길이와 무관하게 1~2자모 차이이므로 예산 2로 구분할 수 있다.
     """
     if name in anchors:
         return name
-    # ponytail: difflib 선형 스캔 — 앵커 수만 건 이상이면 rapidfuzz 로 교체
+    # ponytail: difflib 선형 스캔 — 앵커 수가 수만 건을 넘으면 rapidfuzz로 교체
     j = _jamo(name)
     best, best_edits, tied = None, 0, False
     for anchor in anchors:
@@ -47,7 +47,7 @@ def snap(name: str, anchors: list[str], max_edits: int = 2) -> str | None:
         if best is None or edits < best_edits:
             best, best_edits, tied = anchor, edits, False
         elif edits == best_edits:
-            tied = True  # 어느 앵커인지 모른다 — 앵커 순서로 결과가 뒤집히면 안 된다
+            tied = True  # 어느 앵커가 맞는지 알 수 없으며 앵커 순서에 따라 결과가 바뀌면 안 된다
     return None if tied else best
 
 
@@ -57,11 +57,11 @@ _NON_HANGUL = re.compile(r"[^가-힣 ]")
 
 
 def _plausible(corrected: str, original: str) -> bool:
-    """LLM 교정이 원본의 한글 부분과 닮았는지 결정적 가드.
+    """LLM 교정 결과가 원본의 한글 부분과 유사한지 확인하는 결정론적 방어선.
 
-    프롬프트의 보존 규칙은 강제력이 없다 — 모델이(또는 프롬프트 인젝션이) 전혀 다른
-    이름을 내놔도 여기서 막는다. 원본에서 노이즈(가격·번호·기호)를 뺀 한글만 남기고
-    비교하므로, 정상 교정(오타 1~2자모, 노이즈 제거)은 통과한다.
+    프롬프트의 보존 규칙은 강제력이 없다. 모델이나 프롬프트 인젝션으로 전혀 다른
+    이름이 나와도 여기서 막는다. 원본에서 노이즈(가격·번호·기호)를 제거한 한글만
+    비교하므로 정상적인 교정(오타 1~2자모, 노이즈 제거)은 통과한다.
     """
     base = " ".join(_NON_HANGUL.sub(" ", original).split()) or original
     return difflib.SequenceMatcher(None, _jamo(corrected), _jamo(base)).ratio() >= 0.5
@@ -74,7 +74,7 @@ async def clean_one(name: str, anchors: list[str], normalize: Normalizer) -> dic
     fix = await normalize(name)
     corrected = fix.corrected.strip()
     if not corrected or corrected == name or not _plausible(corrected, name):
-        # 빈 출력·무변경·원본과 동떨어진 출력은 원본 유지 — 지우거나 과교정하지 않는다.
+        # 빈 출력·변경 없음·원본과 동떨어진 출력은 원본을 유지해 삭제나 과교정을 막는다.
         return {"original": name, "name": name, "method": "unchanged", "reason": fix.reason}
     return {"original": name, "name": corrected, "method": "llm", "reason": fix.reason}
 
@@ -114,7 +114,7 @@ reason(한국어 한 문장)과 corrected(정제된 이름)를 반환하세요."
 
 
 def make_normalizer(model_name: str, timeout: int, callbacks: list) -> Normalizer:
-    """실 LLM 기반 정규화기. import를 함수 안에 두어 테스트가 LLM 패키지 없이 돌게 한다."""
+    """실제 LLM 기반 정규화기. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다."""
     from kbap.review import init_model
 
     llm = init_model(model_name, timeout).with_structured_output(NameFix)

@@ -1,7 +1,7 @@
 [project]
 name = "kbap-review"
 version = "0.1.0"
-description = "KB-286 food 최종 검수(scoring) LangGraph 배치"
+description = "food 최종 검수(scoring) LangGraph 배치"
 requires-python = ">=3.12"
 dependencies = [
     "langgraph>=1.0",

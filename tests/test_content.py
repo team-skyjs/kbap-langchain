@@ -1,4 +1,4 @@
-"""콘텐츠 도메인(kbap.content) — 그래프 배선·재시도 규칙·성분 필터·SQS 핸들러."""
+"""콘텐츠 도메인(kbap.content) — 그래프 연결·재시도 규칙·성분 필터·SQS 핸들러."""
 
 import json
 from collections import defaultdict
@@ -20,7 +20,7 @@ TH = Thresholds(description=70, translations=70, avoidance=70)
 
 
 def build_fns(rec, nt_seq=(90,), desc_seq=(90,), avoid_seq=(90,)):
-    """호출 기록(rec)과 검수 점수 시퀀스로 페이크 노드 함수 세트를 만든다."""
+    """호출 기록(rec)과 검수 점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
     nt_scores, desc_scores, avoid_scores = list(nt_seq), list(desc_seq), list(avoid_seq)
 
     async def clean_name(name):
@@ -89,7 +89,7 @@ async def test_happy_path_populates_all_content():
     assert state["description_translations"]["en"].startswith("A stew")
     assert state["avoidance"]["spiciness"] == 3
     assert state["verdict"].passed is True
-    # 생성은 각 1회, 종합판정은 join 후 정확히 1회
+    # 생성은 각각 한 번, 종합 판정은 join 후 정확히 한 번 실행한다
     assert len(rec["gen_desc"]) == 1
     assert len(rec["judge"]) == 1
 
@@ -97,7 +97,7 @@ async def test_happy_path_populates_all_content():
 async def test_generators_receive_cleaned_name():
     rec = defaultdict(list)
     await run(rec)
-    # 원본("김치찌게 8,000원")이 아니라 정제된 이름이 생성 입력이어야 한다.
+    # 생성 단계에는 원본("김치찌게 8,000원")이 아닌 정제된 이름을 전달해야 한다.
     assert rec["gen_nt"][0][0] == "김치찌개"
     assert rec["gen_desc"][0][0] == "김치찌개"
     assert rec["gen_avoid"][0][0] == "김치찌개"
@@ -108,9 +108,9 @@ async def test_review_fail_retries_generation_once_with_feedback():
     state = await run(rec, desc_seq=(30, 90))
 
     assert len(rec["gen_desc"]) == 2
-    # 재시도 프롬프트에 탈락 사유가 실려야 한다.
+    # 재시도 프롬프트에 탈락 사유를 포함해야 한다.
     assert rec["gen_desc"][1][1] == "설명 30"
-    # 설명이 재생성되면 설명 번역도 다시 만든다(순차 갈래).
+    # 설명을 재생성하면 설명 번역도 다시 만든다(순차 분기).
     assert len(rec["gen_desc_tr"]) == 2
     assert state["desc_attempts"] == 2
     assert state["verdict"].passed is True
@@ -121,10 +121,10 @@ async def test_retry_exhausted_flows_failure_to_judge():
     rec = defaultdict(list)
     state = await run(rec, desc_seq=(30, 40))
 
-    # 재시도는 1회 한 — 생성 2회를 넘지 않는다.
+    # 한 번만 재시도해 총 생성 횟수가 2회를 넘지 않는다.
     assert len(rec["gen_desc"]) == 2
     assert len(rec["judge"]) == 1
-    # 종합판정은 실패 점수와 사유를 그대로 받는다.
+    # 종합 판정에는 실패 점수와 사유를 그대로 전달한다.
     judged = rec["judge"][0]
     assert judged["desc_score"].score == 40
     assert judged["desc_feedback"] == "설명 40"
@@ -150,7 +150,7 @@ def test_valid_codes_covers_all_81_candidates():
 
 
 def test_valid_substances_drops_out_of_candidate_codes():
-    # KB-236: 모델이 후보 밖 코드(김치 등)를 흘려도 저장 전에 걸러낸다.
+    # 과거 모델이 후보 밖 코드(김치 등)를 반환한 사례가 있어 저장 전에 걸러낸다.
     items = [
         {"code": "PORK", "inclusionPercent": 95},
         {"code": "KIMCHI", "inclusionPercent": 90},
@@ -196,8 +196,8 @@ async def test_all_success_reports_no_failures():
 
 
 async def test_partial_failure_reports_only_failed_message():
-    # 10건 묶음 소비에서 1건만 실패하면 그 메시지만 재수신돼야 한다 —
-    # 전체 재수신은 성공한 9건의 LLM 비용을 다시 태운다.
+    # 10건 묶음에서 1건만 실패하면 해당 메시지만 다시 수신해야 한다.
+    # 전체를 다시 수신하면 성공한 9건의 LLM 비용이 중복으로 발생한다.
     graph = FakeGraph(fail_names={"불고기"})
     event = {"Records": [record("m1", 1, "김치찌개"), record("m2", 2, "불고기")]}
 
@@ -207,7 +207,7 @@ async def test_partial_failure_reports_only_failed_message():
 
 
 async def test_malformed_body_is_reported_as_failure():
-    # 계약 위반 메시지는 조용히 버리지 않고 실패로 보고해 DLQ 로 흘려보낸다.
+    # 계약 위반 메시지는 버리지 않고 실패로 보고해 DLQ로 보낸다.
     graph = FakeGraph()
     event = {"Records": [{"messageId": "bad", "body": "not-json"}]}
 
