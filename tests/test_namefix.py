@@ -98,3 +98,11 @@ async def test_clean_batch_isolates_failures():
     assert by_original["김치찌게"]["method"] == "snap"
     assert by_original["폭탄"]["method"] == "held"
     assert by_original["마라탕"]["method"] == "unchanged"
+
+
+def test_normalize_prompt_instructs_spacing():
+    # 붙어 쓴 이름의 띄어쓰기 교정도 정제 범위다 — 지시가 빠지면 모델이 건드리지 않는다.
+    from kbap.namefix import normalize_prompt
+
+    p = normalize_prompt("돼지고기김치찌개")
+    assert "띄어쓰기" in p
