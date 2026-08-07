@@ -24,57 +24,57 @@ TH = Thresholds(description=70, translations=70, avoidance=70)
 # ===== 그래프 배선·재시도 =====
 
 
-def build_fns(rec, nt_seq=(90,), desc_seq=(90,), ingredient_seq=(90,)):
+def build_fns(rec, name_translation_seq=(90,), description_seq=(90,), ingredient_seq=(90,)):
     """호출 기록(rec)과 검수 점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
-    nt_scores, desc_scores, ingredient_scores = list(nt_seq), list(desc_seq), list(ingredient_seq)
+    name_translation_seq_scores, description_seq_scores, ingredient_scores = list(name_translation_seq), list(description_seq), list(ingredient_seq)
 
     async def clean_name(name):
         rec["clean"].append(name)
         return {"name": "김치찌개", "reason": "오타 교정"}
 
-    async def gen_name_tr(name, feedback):
+    async def generate_name_translations(name, feedback):
         rec["gen_nt"].append((name, feedback))
         return {"en": "Kimchi Stew"}
 
-    async def gen_desc(name, feedback):
-        rec["gen_desc"].append((name, feedback))
+    async def generate_description(name, feedback):
+        rec["generate_description"].append((name, feedback))
         return "돼지고기와 김치를 끓인 찌개."
 
-    async def gen_desc_tr(name, desc):
-        rec["gen_desc_tr"].append((name, desc))
+    async def generate_description_translations(name, desc):
+        rec["generate_description_translations"].append((name, desc))
         return {"en": "A stew of pork and kimchi."}
 
-    async def gen_ingredients(name, feedback):
-        rec["gen_ingredients"].append((name, feedback))
+    async def generate_ingredients(name, feedback):
+        rec["generate_ingredients"].append((name, feedback))
         return {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3}
 
-    async def rev_name_tr(name, translations):
-        score = nt_scores.pop(0)
+    async def review_name_translations(name, translations):
+        score = name_translation_seq_scores.pop(0)
         return FieldScore(score=score, reason=f"이름번역 {score}")
 
-    async def rev_desc(name, desc, desc_tr):
-        score = desc_scores.pop(0)
+    async def review_description(name, desc, desc_tr):
+        score = description_seq_scores.pop(0)
         return FieldScore(score=score, reason=f"설명 {score}")
 
-    async def rev_ingredients(name, ingredients):
+    async def review_ingredients(name, ingredients):
         score = ingredient_scores.pop(0)
         return FieldScore(score=score, reason=f"기피 {score}")
 
     async def judge(state):
         rec["judge"].append(state)
-        scores = [state["nt_score"], state["desc_score"], state["ingredient_score"]]
+        scores = [state["name_translation_score"], state["description_score"], state["ingredient_score"]]
         passed = all(s.score >= 70 for s in scores)
         return JudgeVerdict(reason="종합", passed=passed, rejected_fields=[])
 
     return ContentFns(
         clean_name=clean_name,
-        gen_name_tr=gen_name_tr,
-        gen_desc=gen_desc,
-        gen_desc_tr=gen_desc_tr,
-        gen_ingredients=gen_ingredients,
-        rev_name_tr=rev_name_tr,
-        rev_desc=rev_desc,
-        rev_ingredients=rev_ingredients,
+        generate_name_translations=generate_name_translations,
+        generate_description=generate_description,
+        generate_description_translations=generate_description_translations,
+        generate_ingredients=generate_ingredients,
+        review_name_translations=review_name_translations,
+        review_description=review_description,
+        review_ingredients=review_ingredients,
         judge=judge,
     )
 
@@ -95,7 +95,7 @@ async def test_happy_path_populates_all_content():
     assert state["ingredients"]["spiciness"] == 3
     assert state["verdict"].passed is True
     # 생성은 각각 한 번, 종합 판정은 join 후 정확히 한 번 실행한다
-    assert len(rec["gen_desc"]) == 1
+    assert len(rec["generate_description"]) == 1
     assert len(rec["judge"]) == 1
 
 
@@ -104,35 +104,35 @@ async def test_generators_receive_cleaned_name():
     await run(rec)
     # 생성 단계에는 원본("김치찌게 8,000원")이 아닌 정제된 이름을 전달해야 한다.
     assert rec["gen_nt"][0][0] == "김치찌개"
-    assert rec["gen_desc"][0][0] == "김치찌개"
-    assert rec["gen_ingredients"][0][0] == "김치찌개"
+    assert rec["generate_description"][0][0] == "김치찌개"
+    assert rec["generate_ingredients"][0][0] == "김치찌개"
 
 
 async def test_review_fail_retries_generation_once_with_feedback():
     rec = defaultdict(list)
-    state = await run(rec, desc_seq=(30, 90))
+    state = await run(rec, description_seq=(30, 90))
 
-    assert len(rec["gen_desc"]) == 2
+    assert len(rec["generate_description"]) == 2
     # 재시도 프롬프트에 탈락 사유를 포함해야 한다.
-    assert rec["gen_desc"][1][1] == "설명 30"
+    assert rec["generate_description"][1][1] == "설명 30"
     # 설명을 재생성하면 설명 번역도 다시 만든다(순차 분기).
-    assert len(rec["gen_desc_tr"]) == 2
-    assert state["desc_attempts"] == 2
+    assert len(rec["generate_description_translations"]) == 2
+    assert state["description_attempts"] == 2
     assert state["verdict"].passed is True
     assert len(rec["judge"]) == 1
 
 
 async def test_retry_exhausted_flows_failure_to_judge():
     rec = defaultdict(list)
-    state = await run(rec, desc_seq=(30, 40))
+    state = await run(rec, description_seq=(30, 40))
 
     # 한 번만 재시도해 총 생성 횟수가 2회를 넘지 않는다.
-    assert len(rec["gen_desc"]) == 2
+    assert len(rec["generate_description"]) == 2
     assert len(rec["judge"]) == 1
     # 종합 판정에는 실패 점수와 사유를 그대로 전달한다.
     judged = rec["judge"][0]
-    assert judged["desc_score"].score == 40
-    assert judged["desc_feedback"] == "설명 40"
+    assert judged["description_score"].score == 40
+    assert judged["description_feedback"] == "설명 40"
     assert state["verdict"].passed is False
 
 
@@ -140,8 +140,8 @@ async def test_independent_branches_do_not_retry_each_other():
     rec = defaultdict(list)
     await run(rec, ingredient_seq=(30, 90))
 
-    assert len(rec["gen_ingredients"]) == 2
-    assert len(rec["gen_desc"]) == 1
+    assert len(rec["generate_ingredients"]) == 2
+    assert len(rec["generate_description"]) == 1
     assert len(rec["gen_nt"]) == 1
 
 
