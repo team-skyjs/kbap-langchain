@@ -73,40 +73,49 @@ class ContentState(TypedDict, total=False):
 def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2):
     """max_attempts=2 → 최초 1회 + 재시도 1회. 그 뒤에는 실패 점수·사유를 안고 판정으로 간다."""
 
+    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 걷어낸 이름이 모든 후속 노드의 입력이 된다
     async def clean_name(state: ContentState):
         fix = await fns.clean_name(state["food_name"])
         return {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
 
+    # ② 이름 번역 생성 (갈래 1) — 9개 언어. 재시도면 검수 탈락 사유(nt_feedback)를 프롬프트에 싣는다
     async def gen_name_tr(state: ContentState):
         tr = await fns.gen_name_tr(state["cleaned_name"], state.get("nt_feedback", ""))
         return {"name_translations": tr, "nt_attempts": state.get("nt_attempts", 0) + 1}
 
+    # 이름 번역 검수 — 언어별 채점 후 최저점 기준. 탈락 사유는 재생성 피드백으로 저장
     async def rev_name_tr(state: ContentState):
         score = await fns.rev_name_tr(state["cleaned_name"], state["name_translations"])
         return {"nt_score": score, "nt_feedback": score.reason}
 
+    # ③ 한국어 설명 생성 (갈래 2 시작) — 한 문장·255자 이하
     async def gen_desc(state: ContentState):
         desc = await fns.gen_desc(state["cleaned_name"], state.get("desc_feedback", ""))
         return {"description": desc, "desc_attempts": state.get("desc_attempts", 0) + 1}
 
+    # 설명 번역 생성 (갈래 2 후속) — 설명이 재생성되면 여기도 항상 다시 돈다
     async def gen_desc_tr(state: ContentState):
         tr = await fns.gen_desc_tr(state["cleaned_name"], state["description"])
         return {"description_translations": tr}
 
+    # 설명·설명 번역 검수 — 내용 사실성과 번역 품질을 한 점수로 판정
     async def rev_desc(state: ContentState):
         score = await fns.rev_desc(
             state["cleaned_name"], state["description"], state["description_translations"]
         )
         return {"desc_score": score, "desc_feedback": score.reason}
 
+    # ④ 기피성분·매운맛 생성 (갈래 3) — 81종 후보 내 선택, 후보 밖 코드는 저장 전 필터
     async def gen_avoid(state: ContentState):
         avoid = await fns.gen_avoid(state["cleaned_name"], state.get("avoid_feedback", ""))
         return {"avoidance": avoid, "avoid_attempts": state.get("avoid_attempts", 0) + 1}
 
+    # 기피성분·매운맛 검수 — 주요 성분 누락(안전 직결)을 최우선으로 감점
     async def rev_avoid(state: ContentState):
         score = await fns.rev_avoid(state["cleaned_name"], state["avoidance"])
         return {"avoid_score": score, "avoid_feedback": score.reason}
 
+    # ⑤ 종합판정 — 세 갈래가 전부 끝난 뒤(defer) 점수·사유를 보고 PASS/FAIL 최종 결정
     async def judge(state: ContentState):
         return {"verdict": await fns.judge(dict(state))}
 

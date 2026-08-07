@@ -407,15 +407,19 @@ class ReviewState(TypedDict, total=False):
 
 
 def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool = False):
+    # 설명 검수 — 설명이 이 음식을 사실대로 설명하는지 0~100 채점 (팬아웃 갈래 1)
     async def score_description(state: ReviewState):
         return {"description_score": await scorers.description(state["food"])}
 
+    # 번역 검수 — 이름·설명 번역을 9개 언어별로 채점, 누락 언어는 0점 (팬아웃 갈래 2)
     async def score_translations(state: ReviewState):
         return {"translation_scores": await scorers.translations(state["food"])}
 
+    # 기피성분·매운맛 검수 — 주요 성분 누락을 최우선으로 채점 (팬아웃 갈래 3)
     async def score_avoidance(state: ReviewState):
         return {"avoidance_score": await scorers.avoidance(state["food"])}
 
+    # 종합판정 — 세 점수를 임계값과 대조해 통과/탈락과 문제 필드를 결정 (순수 함수, LLM 없음)
     def aggregate(state: ReviewState):
         return {
             "verdict": decide(
@@ -426,6 +430,7 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
             )
         }
 
+    # 결과 반영 — 판정을 kbap API 로 POST 해 DB 상태를 바꾼다 (dry_run 이면 건너뜀)
     async def report(state: ReviewState):
         if dry_run:
             return {}
