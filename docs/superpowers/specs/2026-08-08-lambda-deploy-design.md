@@ -24,7 +24,7 @@ Spring 결과 반영 API 호출은 이 설계의 범위가 아니다 — 엔드�
 
 ### 2. `deploy.sh`
 
-- 상단 변수: `REGION=ap-northeast-2`, `ACCOUNT=118178010621`, ECR 리포·함수 이름
+- 상단 변수: `REGION=ap-northeast-2`, `ACCOUNT=118178010621`, ECR 리포(`kbap/langchain`)·함수 이름(`kbap-generate-content`)
 - 동작: ECR 로그인 → `docker build --platform linux/arm64` → push →
   `aws lambda update-function-code`
 - ECR 리포 생성·Lambda 함수 최초 생성은 1회성 콘솔 작업이라 스크립트 범위 밖
