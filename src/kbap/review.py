@@ -64,6 +64,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
 
 # kbap ApiPaths.ADMIN = "/api/v1/admin". base_url에는 호스트만 지정한다.
 CONTENT_REVIEWS = "/api/v1/admin/foods/content-reviews"
+FOOD_CONTENTS = "/api/v1/admin/foods/contents"
 
 
 class KbapClient:
@@ -95,6 +96,16 @@ class KbapClient:
         resp = await self._client.post(f"{CONTENT_REVIEWS}/{food_id}", json=body)
         resp.raise_for_status()
         return resp.json()["payload"]
+
+    async def post_food_content(self, payload: dict) -> None:
+        """완성/실패 판정을 음식 단건으로 적재한다 (agenthub wiki/langchain-food-ingest-contract.md).
+
+        서버가 멱등(있으면 갱신, 없으면 저장, READY는 스킵)이라 재시도가 안전하다.
+        200 외는 전부 예외 — 409(소프트 삭제 충돌) 포함, 호출자가 실패로 보고해
+        DLQ로 보내 사람이 판단하게 한다.
+        """
+        resp = await self._client.post(FOOD_CONTENTS, json=payload)
+        resp.raise_for_status()
 
     async def aclose(self) -> None:
         await self._client.aclose()

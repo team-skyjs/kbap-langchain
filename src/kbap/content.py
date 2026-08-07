@@ -10,6 +10,7 @@ kbap(Spring) 콘텐츠 배치가 하던 생성·검수를 이 그래프가 전�
 
 SQS 메시지 계약(초안): body = {"scannedName": <str>, "foodId": <int, 선택>}
 foodId 는 DB 저장 후 발행하는 경우에만 실린다 — 없으면 이름이 식별자.
+처리 결과는 kbap 적재 API로 POST 한다 — 계약은 agenthub wiki/langchain-food-ingest-contract.md.
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
 from collections.abc import Awaitable, Callable
@@ -556,8 +557,10 @@ def build_ingest_payload(state: dict) -> dict:
     }
 
 
-async def process_event(event: dict, graph, concurrency: int, callbacks: list = []) -> list[str]:
-    """레코드를 동시에 처리하고 실패한 messageId 목록을 반환한다."""
+async def process_event(
+    event: dict, graph, kbap, concurrency: int, callbacks: list = []
+) -> list[str]:
+    """레코드를 동시에 처리해 kbap에 적재하고 실패한 messageId 목록을 반환한다."""
     sem = asyncio.Semaphore(concurrency)
 
     async def one(record: dict) -> str | None:
@@ -575,10 +578,16 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
                     {"food_name": name}, config={"callbacks": callbacks}
                 )
             except Exception:
+                # 런타임 에러는 POST 없이 재시도로 — FAILED에 인프라 장애를 섞지 않는다(계약 전제).
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
                 return message_id
         verdict = result["verdict"]
-        # TODO(kbap 계약 확정 시): PASS/FAIL과 사유를 결과 반영 API로 POST — 멱등성을 보장해야 한다.
+        try:
+            await kbap.post_food_content(build_ingest_payload(result))
+        except Exception:
+            # 서버가 멱등이라 재시도 안전. 3회 소진(409 소프트 삭제 충돌 등)이면 DLQ로.
+            log.exception("적재 실패 foodId=%s (%s)", food_id, name)
+            return message_id
         log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
         return None
 
@@ -586,10 +595,23 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
     return [message_id for message_id in results if message_id]
 
 
+async def _consume(event, graph, concurrency: int, callbacks: list) -> list[str]:
+    # invoke마다 이벤트 루프가 새로 생기므로 httpx 클라이언트는 루프 단위로 만들고 닫는다.
+    from kbap.review import KbapClient
+
+    with open(os.environ.get("CONFIG_PATH", "config.yaml")) as f:
+        raw = yaml.safe_load(f)
+    kbap = KbapClient(raw["kbap_api"]["base_url"], os.environ["KBAP_API_TOKEN"])
+    try:
+        return await process_event(event, graph, kbap, concurrency, callbacks)
+    finally:
+        await kbap.aclose()
+
+
 def handler(event, context):
     graph = _cached_graph()
     concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
-    failed = asyncio.run(process_event(event, graph, concurrency, make_callbacks()))
+    failed = asyncio.run(_consume(event, graph, concurrency, make_callbacks()))
 
     # Lambda는 응답 반환 후 프로세스를 멈추므로 atexit이 호출되지 않아 여기서 직접 flush한다.
     from langfuse import get_client

@@ -322,40 +322,90 @@ def test_valid_substances_drops_zero_percent():
 
 
 class FakeGraph:
-    def __init__(self, fail_names=()):
+    def __init__(self, fail_names=(), verdict=None):
         self.calls = []
         self.fail_names = set(fail_names)
+        self.verdict = verdict or JudgeVerdict(reason="ok", passed=True)
 
     async def ainvoke(self, state, config=None):
-        self.calls.append(state["food_name"])
-        if state["food_name"] in self.fail_names:
+        name = state["food_name"]
+        self.calls.append(name)
+        if name in self.fail_names:
             raise RuntimeError("LLM down")
-        return {**state, "verdict": JudgeVerdict(reason="ok", passed=True)}
+        # 실제 그래프처럼 완결된 최종 상태를 돌려준다 — 페이로드 조립이 이 키들을 쓴다.
+        return {
+            **state,
+            "cleaned_name": name,
+            "description": f"{name} 설명",
+            "name_translations": {"en": "x"},
+            "description_translations": {"en": "y"},
+            "ingredients": {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3},
+            "verdict": self.verdict,
+        }
+
+
+class FakeKbap:
+    def __init__(self, fail=False):
+        self.posts = []
+        self.fail = fail
+
+    async def post_food_content(self, payload):
+        if self.fail:
+            raise RuntimeError("kbap 5xx")
+        self.posts.append(payload)
 
 
 def record(message_id: str, food_id: int, name: str) -> dict:
     return {"messageId": message_id, "body": json.dumps({"foodId": food_id, "scannedName": name})}
 
 
-async def test_all_success_reports_no_failures():
-    graph = FakeGraph()
+async def test_all_success_posts_each_food_and_reports_no_failures():
+    graph, kbap = FakeGraph(), FakeKbap()
     event = {"Records": [record("m1", 1, "김치찌개"), record("m2", 2, "불고기")]}
 
-    failures = await process_event(event, graph, concurrency=20)
+    failures = await process_event(event, graph, kbap, concurrency=20)
 
     assert failures == []
     assert sorted(graph.calls) == ["김치찌개", "불고기"]
+    assert sorted(p["displayName"] for p in kbap.posts) == ["김치찌개", "불고기"]
+    assert all(p["passed"] for p in kbap.posts)
+
+
+async def test_failed_verdict_is_posted_with_failure_kind():
+    # 판정 실패도 kbap에 적재한다(FAILED 상태 저장) — 메시지 재시도 대상이 아니다.
+    verdict = JudgeVerdict(reason="번역 미달", passed=False, failure_kind="JUDGE_REJECTED")
+    graph, kbap = FakeGraph(verdict=verdict), FakeKbap()
+    event = {"Records": [record("m1", 1, "김치찌개")]}
+
+    failures = await process_event(event, graph, kbap, concurrency=20)
+
+    assert failures == []
+    assert kbap.posts == [
+        {"displayName": "김치찌개", "passed": False, "failureKind": "JUDGE_REJECTED", "reason": "번역 미달"}
+    ]
+
+
+async def test_post_failure_reports_message_for_retry():
+    # 네트워크·5xx·409 전부 — POST 실패면 재시도(→3회 후 DLQ)로 보낸다.
+    graph, kbap = FakeGraph(), FakeKbap(fail=True)
+    event = {"Records": [record("m1", 1, "김치찌개")]}
+
+    failures = await process_event(event, graph, kbap, concurrency=20)
+
+    assert failures == ["m1"]
 
 
 async def test_partial_failure_reports_only_failed_message():
     # 10건 묶음에서 1건만 실패하면 해당 메시지만 다시 수신해야 한다.
     # 전체를 다시 수신하면 성공한 9건의 LLM 비용이 중복으로 발생한다.
-    graph = FakeGraph(fail_names={"불고기"})
+    graph, kbap = FakeGraph(fail_names={"불고기"}), FakeKbap()
     event = {"Records": [record("m1", 1, "김치찌개"), record("m2", 2, "불고기")]}
 
-    failures = await process_event(event, graph, concurrency=20)
+    failures = await process_event(event, graph, kbap, concurrency=20)
 
     assert failures == ["m2"]
+    # 그래프 런타임 예외는 POST하지 않는다 — FAILED에 인프라 장애를 섞지 않는다.
+    assert [p["displayName"] for p in kbap.posts] == ["김치찌개"]
 
 
 async def test_name_only_message_is_processed():
@@ -363,7 +413,7 @@ async def test_name_only_message_is_processed():
     graph = FakeGraph()
     event = {"Records": [{"messageId": "m1", "body": json.dumps({"scannedName": "김치찌개"})}]}
 
-    failures = await process_event(event, graph, concurrency=20)
+    failures = await process_event(event, graph, FakeKbap(), concurrency=20)
 
     assert failures == []
     assert graph.calls == ["김치찌개"]
@@ -371,10 +421,11 @@ async def test_name_only_message_is_processed():
 
 async def test_malformed_body_is_reported_as_failure():
     # 계약 위반 메시지는 버리지 않고 실패로 보고해 DLQ로 보낸다.
-    graph = FakeGraph()
+    graph, kbap = FakeGraph(), FakeKbap()
     event = {"Records": [{"messageId": "bad", "body": "not-json"}]}
 
-    failures = await process_event(event, graph, concurrency=20)
+    failures = await process_event(event, graph, kbap, concurrency=20)
 
     assert failures == ["bad"]
     assert graph.calls == []
+    assert kbap.posts == []
