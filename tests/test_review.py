@@ -274,6 +274,12 @@ def test_translation_scores_schema():
     assert ts.items[0].lang == "en"
 
 
+def test_translation_lang_score_reason_optional():
+    # 통과 언어는 reason을 생략해 출력 토큰을 아낀다 — 스키마가 빈 값을 허용해야 한다.
+    ts = TranslationScores(items=[{"lang": "en", "score": 90}])
+    assert ts.items[0].reason == ""
+
+
 def test_description_prompt_contains_food():
     p = description_prompt(PROMPT_FOOD)
     assert "김치찌개" in p

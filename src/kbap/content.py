@@ -25,7 +25,7 @@ from langgraph.types import RetryPolicy
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from kbap.prompts import (
-    AVOID_GEN_TEMPLATE,
+    INGREDIENTS_GEN_TEMPLATE,
     DESC_REVIEW_TEMPLATE,
     DESC_TEMPLATE,
     DESC_TR_TEMPLATE,
@@ -55,13 +55,13 @@ class JudgeVerdict(BaseModel):
 
 class ContentFns(NamedTuple):
     clean_name: Callable[[str], Awaitable[dict]]
-    gen_name_tr: Callable[[str, str], Awaitable[dict]]
-    gen_desc: Callable[[str, str], Awaitable[str]]
-    gen_desc_tr: Callable[[str, str], Awaitable[dict]]
-    gen_avoid: Callable[[str, str], Awaitable[dict]]
-    rev_name_tr: Callable[[str, dict], Awaitable[FieldScore]]
-    rev_desc: Callable[[str, str, dict], Awaitable[FieldScore]]
-    rev_avoid: Callable[[str, dict], Awaitable[FieldScore]]
+    generate_name_translations: Callable[[str, str], Awaitable[dict]]
+    generate_description: Callable[[str, str], Awaitable[str]]
+    generate_description_translations: Callable[[str, str], Awaitable[dict]]
+    generate_ingredients: Callable[[str, str], Awaitable[dict]]
+    review_name_translations: Callable[[str, dict], Awaitable[FieldScore]]
+    review_description: Callable[[str, str, dict], Awaitable[FieldScore]]
+    review_ingredients: Callable[[str, dict], Awaitable[FieldScore]]
     judge: Callable[[dict], Awaitable[JudgeVerdict]]
 
 
@@ -70,69 +70,92 @@ class ContentState(TypedDict, total=False):
     cleaned_name: str
     clean_reason: str
     name_translations: dict[str, str]
-    nt_score: FieldScore
-    nt_attempts: int
-    nt_feedback: str
+    name_translation_score: FieldScore
+    name_translation_attempts: int
+    name_translation_feedback: str
     description: str
     description_translations: dict[str, str]
-    desc_score: FieldScore
-    desc_attempts: int
-    desc_feedback: str
-    avoidance: dict
-    avoid_score: FieldScore
-    avoid_attempts: int
-    avoid_feedback: str
+    description_score: FieldScore
+    description_attempts: int
+    description_feedback: str
+    ingredients: dict
+    ingredient_score: FieldScore
+    ingredient_attempts: int
+    ingredient_feedback: str
     verdict: JudgeVerdict
 
 
 def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2):
     """max_attempts=2이면 최초 호출 1회와 재시도 1회 후 실패 점수·사유를 담아 판정한다."""
 
-    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다
+    # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다.
+    # 음식이 아니거나(옵션·안내 문구) 판독 불가면 여기서 FAIL verdict를 만들고 그래프를 끝내
+    # 생성·검수 8콜을 아낀다.
     async def clean_name(state: ContentState):
         fix = await fns.clean_name(state["food_name"])
-        return {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
+        out: ContentState = {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
+        if fix.get("method") == "rejected":
+            reason = fix.get("reason", "") or "음식 메뉴명이 아님"
+            out["verdict"] = JudgeVerdict(passed=False, reason=f"콘텐츠 생성 부적합: {reason}")
+        return out
 
-    # ② 이름 번역 생성(분기 1) — 9개 언어. 재시도 시 탈락 사유(nt_feedback)를 프롬프트에 넣는다
-    async def gen_name_tr(state: ContentState):
-        tr = await fns.gen_name_tr(state["cleaned_name"], state.get("nt_feedback", ""))
-        return {"name_translations": tr, "nt_attempts": state.get("nt_attempts", 0) + 1}
+    # 부적합 판정이면 곧장 END, 아니면 3개 분기로 팬아웃한다
+    def route_after_clean(state: ContentState):
+        if "verdict" in state:
+            return END
+        return ["generate_name_translations", "generate_description", "generate_ingredients"]
+
+    # ② 이름 번역 생성(분기 1) — 9개 언어. 재시도 시 탈락 사유(name_translation_feedback)를 프롬프트에 넣는다
+    async def generate_name_translations(state: ContentState):
+        tr = await fns.generate_name_translations(state["cleaned_name"], state.get("name_translation_feedback", ""))
+        return {"name_translations": tr, "name_translation_attempts": state.get("name_translation_attempts", 0) + 1}
 
     # 이름 번역 검수 — 언어별 점수 중 최저점을 적용하고 탈락 사유를 재생성 피드백으로 저장한다
-    async def rev_name_tr(state: ContentState):
-        score = await fns.rev_name_tr(state["cleaned_name"], state["name_translations"])
-        return {"nt_score": score, "nt_feedback": score.reason}
+    async def review_name_translations(state: ContentState):
+        score = await fns.review_name_translations(state["cleaned_name"], state["name_translations"])
+        return {"name_translation_score": score, "name_translation_feedback": score.reason}
 
     # ③ 한국어 설명 생성(분기 2 시작) — 한 문장, 255자 이하
-    async def gen_desc(state: ContentState):
-        desc = await fns.gen_desc(state["cleaned_name"], state.get("desc_feedback", ""))
-        return {"description": desc, "desc_attempts": state.get("desc_attempts", 0) + 1}
+    async def generate_description(state: ContentState):
+        desc = await fns.generate_description(state["cleaned_name"], state.get("description_feedback", ""))
+        return {"description": desc, "description_attempts": state.get("description_attempts", 0) + 1}
 
     # 설명 번역 생성(분기 2 후속) — 설명을 재생성할 때마다 번역도 다시 생성한다
-    async def gen_desc_tr(state: ContentState):
-        tr = await fns.gen_desc_tr(state["cleaned_name"], state["description"])
+    async def generate_description_translations(state: ContentState):
+        tr = await fns.generate_description_translations(state["cleaned_name"], state["description"])
         return {"description_translations": tr}
 
     # 설명·설명 번역 검수 — 내용의 사실성과 번역 품질을 하나의 점수로 판정한다
-    async def rev_desc(state: ContentState):
-        score = await fns.rev_desc(
+    async def review_description(state: ContentState):
+        score = await fns.review_description(
             state["cleaned_name"], state["description"], state["description_translations"]
         )
-        return {"desc_score": score, "desc_feedback": score.reason}
+        return {"description_score": score, "description_feedback": score.reason}
 
     # ④ 기피성분·매운맛 생성(분기 3) — 81종 후보에서 선택하고 후보 밖 코드는 저장 전에 거른다
-    async def gen_avoid(state: ContentState):
-        avoid = await fns.gen_avoid(state["cleaned_name"], state.get("avoid_feedback", ""))
-        return {"avoidance": avoid, "avoid_attempts": state.get("avoid_attempts", 0) + 1}
+    async def generate_ingredients(state: ContentState):
+        ing = await fns.generate_ingredients(state["cleaned_name"], state.get("ingredient_feedback", ""))
+        return {"ingredients": ing, "ingredient_attempts": state.get("ingredient_attempts", 0) + 1}
 
     # 기피성분·매운맛 검수 — 안전과 직결된 주요 성분 누락을 최우선으로 감점한다
-    async def rev_avoid(state: ContentState):
-        score = await fns.rev_avoid(state["cleaned_name"], state["avoidance"])
-        return {"avoid_score": score, "avoid_feedback": score.reason}
+    async def review_ingredients(state: ContentState):
+        score = await fns.review_ingredients(state["cleaned_name"], state["ingredients"])
+        return {"ingredient_score": score, "ingredient_feedback": score.reason}
 
-    # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다
+    # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다.
+    # 기피성분만은 결정론적 fail-closed: 프롬프트의 "임계값 미달은 탈락" 지시는 강제력이
+    # 없고, 알레르기 데이터는 오통과가 누락보다 위험하다(valid_substances 필터와 같은 철학).
     async def judge(state: ContentState):
-        return {"verdict": await fns.judge(dict(state))}
+        verdict = await fns.judge(dict(state))
+        ingredient = state["ingredient_score"]
+        if verdict.passed and ingredient.score < thresholds.avoidance:
+            verdict = JudgeVerdict(
+                passed=False,
+                reason=f"기피성분 {ingredient.score}점 < 임계값 {thresholds.avoidance}: "
+                f"{ingredient.reason}",
+                rejected_fields=["avoidance"],
+            )
+        return {"verdict": verdict}
 
     def _route(score_key: str, attempts_key: str, threshold: int, retry_target: str):
         def route(state: ContentState) -> str:
@@ -147,38 +170,40 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ContentState)
     g.add_node("clean_name", clean_name, retry_policy=retry)
-    g.add_node("gen_name_tr", gen_name_tr, retry_policy=retry)
-    g.add_node("rev_name_tr", rev_name_tr, retry_policy=retry)
-    g.add_node("gen_desc", gen_desc, retry_policy=retry)
-    g.add_node("gen_desc_tr", gen_desc_tr, retry_policy=retry)
-    g.add_node("rev_desc", rev_desc, retry_policy=retry)
-    g.add_node("gen_avoid", gen_avoid, retry_policy=retry)
-    g.add_node("rev_avoid", rev_avoid, retry_policy=retry)
+    g.add_node("generate_name_translations", generate_name_translations, retry_policy=retry)
+    g.add_node("review_name_translations", review_name_translations, retry_policy=retry)
+    g.add_node("generate_description", generate_description, retry_policy=retry)
+    g.add_node("generate_description_translations", generate_description_translations, retry_policy=retry)
+    g.add_node("review_description", review_description, retry_policy=retry)
+    g.add_node("generate_ingredients", generate_ingredients, retry_policy=retry)
+    g.add_node("review_ingredients", review_ingredients, retry_policy=retry)
     # defer=True — 세 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다.
     g.add_node("judge", judge, defer=True, retry_policy=retry)
 
     g.add_edge(START, "clean_name")
-    g.add_edge("clean_name", "gen_name_tr")
-    g.add_edge("clean_name", "gen_desc")
-    g.add_edge("clean_name", "gen_avoid")
-    g.add_edge("gen_name_tr", "rev_name_tr")
-    g.add_edge("gen_desc", "gen_desc_tr")  # 설명을 재생성하면 번역도 함께 다시 만든다
-    g.add_edge("gen_desc_tr", "rev_desc")
-    g.add_edge("gen_avoid", "rev_avoid")
     g.add_conditional_edges(
-        "rev_name_tr",
-        _route("nt_score", "nt_attempts", thresholds.translations, "gen_name_tr"),
-        ["gen_name_tr", "judge"],
+        "clean_name",
+        route_after_clean,
+        ["generate_name_translations", "generate_description", "generate_ingredients", END],
+    )
+    g.add_edge("generate_name_translations", "review_name_translations")
+    g.add_edge("generate_description", "generate_description_translations")  # 설명을 재생성하면 번역도 함께 다시 만든다
+    g.add_edge("generate_description_translations", "review_description")
+    g.add_edge("generate_ingredients", "review_ingredients")
+    g.add_conditional_edges(
+        "review_name_translations",
+        _route("name_translation_score", "name_translation_attempts", thresholds.translations, "generate_name_translations"),
+        ["generate_name_translations", "judge"],
     )
     g.add_conditional_edges(
-        "rev_desc",
-        _route("desc_score", "desc_attempts", thresholds.description, "gen_desc"),
-        ["gen_desc", "judge"],
+        "review_description",
+        _route("description_score", "description_attempts", thresholds.description, "generate_description"),
+        ["generate_description", "judge"],
     )
     g.add_conditional_edges(
-        "rev_avoid",
-        _route("avoid_score", "avoid_attempts", thresholds.avoidance, "gen_avoid"),
-        ["gen_avoid", "judge"],
+        "review_ingredients",
+        _route("ingredient_score", "ingredient_attempts", thresholds.avoidance, "generate_ingredients"),
+        ["generate_ingredients", "judge"],
     )
     g.add_edge("judge", END)
     return g.compile()
@@ -190,6 +215,10 @@ LANGS = ", ".join(TARGET_LANGS)
 # 생성 결과 형식 검증 — 스프링이 LLM 응답 경계에서 require 로 잡던 규칙의 이관.
 # pydantic ValidationError 는 _retryable 에 걸려 그래프 RetryPolicy 가 재생성을 유도한다.
 # scoring.FieldScore와 같은 이유로 reason을 결과보다 앞에 두어 근거를 먼저 세우게 한다.
+# 마침표 금지 정책이 잘라내는 종결 부호 — 반각·전각·일본어/중국어 마침표.
+_TRAILING_PERIODS = ".。．"
+
+
 class TranslationItem(BaseModel):
     lang: str
     text: str = Field(min_length=1)
@@ -197,7 +226,9 @@ class TranslationItem(BaseModel):
     @field_validator("text")
     @classmethod
     def _not_blank(cls, v: str) -> str:
-        if not v.strip():
+        # 설명과 같은 마침표 금지 정책 — 언어별 종결 부호까지 잘라낸다.
+        v = v.strip().rstrip(_TRAILING_PERIODS)
+        if not v:
             raise ValueError("번역 값은 빈 문자열일 수 없다")
         return v
 
@@ -215,25 +246,31 @@ class Translations(BaseModel):
         return self
 
 
-class AvoidanceItem(BaseModel):
+class IngredientItem(BaseModel):
     code: str
     inclusionPercent: int = Field(ge=0, le=100)
 
 
-class AvoidanceGen(BaseModel):
+class IngredientsGen(BaseModel):
     reason: str
-    items: list[AvoidanceItem]
+    items: list[IngredientItem]
     spiciness: int = Field(ge=0, le=10)
 
 
 class DescGen(BaseModel):
-    description: str = Field(max_length=255)
+    description: str
 
     @field_validator("description")
     @classmethod
     def _not_blank_or_placeholder(cls, v: str) -> str:
-        if not v.strip() or v.strip() == "설명 준비 중":
+        # 마침표 금지는 프롬프트로 지시하되, 모델이 어겨도 재생성 대신 잘라낸다(콘텐츠 정책).
+        # 길이 검사는 마침표 제거 후에 한다 — Field(max_length)는 validator보다 먼저 실행돼
+        # "255자 + 마침표" 입력을 잘라내지 못하고 탈락시킨다.
+        v = v.strip().rstrip(_TRAILING_PERIODS)
+        if not v or v == "설명 준비 중":
             raise ValueError("설명은 비거나 플레이스홀더일 수 없다")
+        if len(v) > 255:
+            raise ValueError("설명은 255자 이하여야 한다")
         return v
 
 
@@ -291,17 +328,17 @@ def desc_tr_prompt(name: str, description: str) -> str:
     )
 
 
-def avoid_gen_prompt(name: str, feedback: str) -> str:
+def ingredients_gen_prompt(name: str, feedback: str) -> str:
     return render_prompt(
         "food-ingredients",
-        AVOID_GEN_TEMPLATE,
+        INGREDIENTS_GEN_TEMPLATE,
         name=name,
         candidate_codes=AVOIDANCE_CODES,
         feedback_block=_feedback_block(feedback),
     )
 
 
-def name_tr_review_prompt(name: str, translations: dict) -> str:
+def name_tr_review_prompt(name: str, translations: dict, pass_score: int) -> str:
     return render_prompt(
         "food-name-translation-review",
         NAME_TR_REVIEW_TEMPLATE,
@@ -309,6 +346,7 @@ def name_tr_review_prompt(name: str, translations: dict) -> str:
         translations=json.dumps(translations, ensure_ascii=False),
         lang_count=len(TARGET_LANGS),
         langs=LANGS,
+        pass_score=pass_score,
     )
 
 
@@ -324,9 +362,9 @@ def desc_review_prompt(name: str, description: str, translations: dict) -> str:
 
 def judge_prompt(state: dict, thresholds) -> str:
     scores = {
-        "이름 번역": (state["nt_score"], thresholds.translations),
-        "설명·설명 번역": (state["desc_score"], thresholds.description),
-        "기피성분·매운맛": (state["avoid_score"], thresholds.avoidance),
+        "이름 번역": (state["name_translation_score"], thresholds.translations),
+        "설명·설명 번역": (state["description_score"], thresholds.description),
+        "기피성분·매운맛": (state["ingredient_score"], thresholds.avoidance),
     }
     # 조건·반복이 있는 부분은 코드에서 미리 계산해 변수로 넣는다 — Langfuse 템플릿엔 로직이 없다.
     lines = "\n".join(
@@ -337,62 +375,89 @@ def judge_prompt(state: dict, thresholds) -> str:
     )
 
 
-def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = None):
-    """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다."""
+def make_fns(
+    model: str,
+    timeout: int,
+    thresholds,
+    judge_model: str | None = None,
+    gen_model: str | None = None,
+    namefix_model: str | None = None,
+    callbacks: list = [],
+):
+    """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다.
+
+    역할별 모델 분리: judge 는 짧은 점수 요약을 읽고 통과/탈락만 정하므로 저렴한 모델로
+    내릴 수 있고(judge_model), 이름 정제는 _plausible·길이 방어선이 있어 실패해도 원본
+    유지로 끝나므로 역시 내릴 수 있다(namefix_model). 품질이 곧 결과물인 번역·설명 생성만
+    올릴 수 있다(gen_model). 기피성분 생성·검수는 안전 데이터라 기본 모델(model)을 유지한다.
+
+    callbacks 는 노드를 그래프 밖에서 직접 호출할 때(노트북) 트레이싱용이다.
+    그래프로 실행하면 ainvoke 의 config 콜백이 전파되므로 비워 둔다 — 둘 다 주면 중복 기록된다.
+    """
     from kbap.namefix import clean_one, make_normalizer
     from kbap.review import init_model
 
+    def _bind(llm):
+        return llm.with_config(callbacks=callbacks) if callbacks else llm
+
     base = init_model(model, timeout)
-    judge_llm = init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict)
-    tr_llm = base.with_structured_output(Translations)
-    desc_llm = base.with_structured_output(DescGen)
-    avoid_llm = base.with_structured_output(AvoidanceGen)
-    score_llm = base.with_structured_output(FieldScore)
-    tr_score_llm = base.with_structured_output(TranslationScores)
-    normalize = make_normalizer(model, timeout, callbacks=[])
+    gen_base = init_model(gen_model, timeout) if gen_model and gen_model != model else base
+    judge_llm = _bind(init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict))
+    tr_llm = _bind(gen_base.with_structured_output(Translations))
+    desc_llm = _bind(gen_base.with_structured_output(DescGen))
+    ingredients_llm = _bind(base.with_structured_output(IngredientsGen))
+    score_llm = _bind(base.with_structured_output(FieldScore))
+    tr_score_llm = _bind(base.with_structured_output(TranslationScores))
+    normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
     async def clean_name(name: str) -> dict:
         # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정된 음식명을 앵커로 주입
         return await clean_one(name, [], normalize)
 
-    async def gen_name_tr(name: str, feedback: str) -> dict:
+    async def generate_name_translations(name: str, feedback: str) -> dict:
         result: Translations = await tr_llm.ainvoke(name_tr_prompt(name, feedback))
         return {i.lang: i.text for i in result.items}
 
-    async def gen_desc(name: str, feedback: str) -> str:
+    async def generate_description(name: str, feedback: str) -> str:
         result: DescGen = await desc_llm.ainvoke(desc_prompt(name, feedback))
         return result.description
 
-    async def gen_desc_tr(name: str, description: str) -> dict:
+    async def generate_description_translations(name: str, description: str) -> dict:
         result: Translations = await tr_llm.ainvoke(desc_tr_prompt(name, description))
         return {i.lang: i.text for i in result.items}
 
-    async def gen_avoid(name: str, feedback: str) -> dict:
+    async def generate_ingredients(name: str, feedback: str) -> dict:
         # ponytail: 단일 모델 — kbap은 여러 모델의 fan-out 결과를 minAgreement(2)로 종합한다.
         # 안전 데이터의 정확도가 부족하면 해당 합의 구조나 web_search 도구를 이식한다.
-        result: AvoidanceGen = await avoid_llm.ainvoke(avoid_gen_prompt(name, feedback))
+        result: IngredientsGen = await ingredients_llm.ainvoke(ingredients_gen_prompt(name, feedback))
         return {
             "substances": valid_substances([i.model_dump() for i in result.items]),
             "spiciness": result.spiciness,
         }
 
-    async def rev_name_tr(name: str, translations: dict) -> FieldScore:
+    async def review_name_translations(name: str, translations: dict) -> FieldScore:
         result: TranslationScores = await tr_score_llm.ainvoke(
-            name_tr_review_prompt(name, translations)
+            name_tr_review_prompt(name, translations, thresholds.translations)
         )
         scores = lang_scores(result)  # 누락 언어를 0점으로 채우는 fail-closed 로직 재사용
         worst = min(scores.values(), key=lambda s: s.score)
-        failing = [f"{lang} {s.score}점: {s.reason}" for lang, s in scores.items() if s.score < 100]
+        # 기준 미만 언어만 reason이 오므로(출력 토큰 절감) 피드백도 그 언어들로만 구성한다.
+        # 모델이 지시를 어기고 reason 없이 기준 미만 점수를 준 언어도 점수는 남긴다(fail-closed).
+        failing = [
+            f"{lang} {s.score}점: {s.reason}".rstrip(": ")
+            for lang, s in scores.items()
+            if s.reason or s.score < thresholds.translations
+        ]
         return FieldScore(score=worst.score, reason="; ".join(failing) or "이상 없음")
 
-    async def rev_desc(name: str, description: str, translations: dict) -> FieldScore:
+    async def review_description(name: str, description: str, translations: dict) -> FieldScore:
         return await score_llm.ainvoke(desc_review_prompt(name, description, translations))
 
-    async def rev_avoid(name: str, avoidance: dict) -> FieldScore:
+    async def review_ingredients(name: str, ingredients: dict) -> FieldScore:
         food = {
             "koreanName": name,
-            "avoidanceSubstances": avoidance["substances"],
-            "spiciness": avoidance["spiciness"],
+            "avoidanceSubstances": ingredients["substances"],
+            "spiciness": ingredients["spiciness"],
         }
         return await score_llm.ainvoke(avoidance_prompt(food))
 
@@ -401,13 +466,13 @@ def make_fns(model: str, timeout: int, thresholds, judge_model: str | None = Non
 
     return ContentFns(
         clean_name=clean_name,
-        gen_name_tr=gen_name_tr,
-        gen_desc=gen_desc,
-        gen_desc_tr=gen_desc_tr,
-        gen_avoid=gen_avoid,
-        rev_name_tr=rev_name_tr,
-        rev_desc=rev_desc,
-        rev_avoid=rev_avoid,
+        generate_name_translations=generate_name_translations,
+        generate_description=generate_description,
+        generate_description_translations=generate_description_translations,
+        generate_ingredients=generate_ingredients,
+        review_name_translations=review_name_translations,
+        review_description=review_description,
+        review_ingredients=review_ingredients,
         judge=judge,
     )
 
@@ -435,6 +500,8 @@ def load_graph(config_path: str | None = None):
         llm.get("timeout_seconds", 120),
         thresholds,
         judge_model=llm.get("judge_model"),
+        gen_model=llm.get("gen_model"),
+        namefix_model=llm.get("namefix_model"),
     )
     return build_content_graph(fns, thresholds)
 

@@ -17,6 +17,11 @@ from pydantic import BaseModel
 # 모델이 근거를 먼저 세운 뒤 교정명을 생성하게 한다(scoring.FieldScore와 같은 이유).
 class NameFix(BaseModel):
     reason: str
+    # 단일 음식 메뉴명이 아니면(옵션·카테고리 제목·판독 불가) False — 그래프가 생성 없이 끝낸다.
+    # 주의: strict structured output은 모든 필드를 필수로 만들어 모델이 이 값을 반드시 생성한다.
+    # 판정 기준은 프롬프트(food-namefix v4+)가 지시해야 하며, 기본 True는 스키마를 강제하지
+    # 않는 경로에서만 안전값으로 동작한다.
+    is_food: bool = True
     corrected: str
 
 
@@ -80,6 +85,9 @@ async def clean_one(name: str, anchors: list[str], normalize: Normalizer) -> dic
     if snapped is not None:
         return {"original": name, "name": snapped, "method": "snap", "reason": ""}
     fix = await normalize(name)
+    if not fix.is_food:
+        # 옵션("사리 추가")·판독 불가 텍스트 — 콘텐츠 생성 대상이 아니므로 호출부가 걸러낸다.
+        return {"original": name, "name": name, "method": "rejected", "reason": fix.reason}
     corrected = fix.corrected.strip()
     if (
         not corrected

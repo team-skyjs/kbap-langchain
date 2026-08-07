@@ -30,9 +30,19 @@ NAMEFIX_TEMPLATE = """당신은 메뉴판 OCR로 수집된 한국 음식 이름�
 
 정제된 이름은 공백 포함 20자 이내여야 합니다.
 
+## is_food 판정 — 콘텐츠를 만들 단일 음식 메뉴명인가
+
+다음은 is_food=false 로 판정하세요:
+- 옵션·추가 항목: "사리 추가", "치즈 추가", "곱빼기", "공기밥 추가" 같은 부가 선택지
+- 메뉴가 아닌 줄: 카테고리 제목("사이드 메뉴", "주류"), 안내 문구("포장 가능"), 가격·번호만 있는 텍스트
+- 판독 불가: 글자가 깨져 어떤 음식인지 복원할 수 없는 텍스트
+
+false 면 corrected 는 원본 그대로 두고, reason 에 왜 부적합한지 쓰세요.
+애매하면 true 로 두세요 — 잘못 걸러진 음식은 콘텐츠를 얻지 못하지만, 잘못 통과한 항목은 검수가 거릅니다.
+
 이름: {{name}}
 
-reason(한국어 한 문장)과 corrected(정제된 이름)를 반환하세요."""
+reason(한국어 한 문장), is_food, corrected(정제된 이름)를 반환하세요."""
 
 # ===== 생성: 이름 번역 / 설명 / 설명 번역 / 기피 재료 =====
 
@@ -73,6 +83,7 @@ DESC_TEMPLATE = """당신은 한식 메뉴 데이터베이스 담당자입니다
 
 description: 한국어 한 줄 설명
 - 요리법·주재료가 드러나는 한 문장. 과장 없이 사실적으로.
+- 문장 끝에 마침표를 붙이지 않는다.
 - 반드시 255자 이하. 빈 값·"설명 준비 중" 같은 템플릿 문구 금지.
 - 예시(치즈볼): "치즈를 넣은 반죽을 둥글게 튀긴 사이드 메뉴"
 
@@ -91,11 +102,12 @@ DESC_TR_TEMPLATE = f"""당신은 한식 메뉴 데이터베이스 담당자입�
 items: 설명을 9개 언어로 실제 번역한 값 (템플릿 문구·원문 복사 금지)
 {_TRANSLATION_RULES}
 - 원문에 없는 내용을 더하거나 빼지 않는다.
+- 문장 끝에 마침표·종결 부호를 붙이지 않는다 (".", "。" 등 생략).
 - 예시(치즈볼 "치즈를 넣은 반죽을 둥글게 튀긴 사이드 메뉴"):
-  en "Round fried dough balls filled with cheese.", ja "チーズを入れた生地を丸く揚げたサイドメニュー。",
-  zh-Hans "面团包入芝士后炸成圆球的小吃。\""""
+  en "Round fried dough balls filled with cheese", ja "チーズを入れた生地を丸く揚げたサイドメニュー",
+  zh-Hans "面团包入芝士后炸成圆球的小吃\""""
 
-AVOID_GEN_TEMPLATE = """너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
+INGREDIENTS_GEN_TEMPLATE = """너는 한국 음식 레시피와 알레르기·기피성분 전문가다. 아래 메뉴의 대표 레시피를 기준으로
 기피성분의 포함 확률을 1~100 정수로 매기고, 음식의 맵기를 0~10 정수로 판정하라.
 음식명: "{{name}}"
 
@@ -167,7 +179,8 @@ NAME_TR_REVIEW_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한�
 음식 이름(한국어): {{name}}
 이름 번역: {{translations}}
 
-items 배열은 정확히 {{lang_count}}개({{langs}}), 각각 lang·score·reason(한국어 한 문장)."""
+items 배열은 정확히 {{lang_count}}개({{langs}}), 각각 lang·reason·score.
+reason 은 {{pass_score}}점 미만인 언어만 한국어 한 문장으로 쓰고, 그 외에는 빈 문자열로 두세요."""
 
 DESC_REVIEW_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 설명과 설명 번역을 함께 0~100점
 하나로 채점하세요:
@@ -292,7 +305,7 @@ PROMPTS = {
     "food-name-translation": NAME_TR_TEMPLATE,
     "food-description": DESC_TEMPLATE,
     "food-description-translation": DESC_TR_TEMPLATE,
-    "food-ingredients": AVOID_GEN_TEMPLATE,
+    "food-ingredients": INGREDIENTS_GEN_TEMPLATE,
     "food-name-translation-review": NAME_TR_REVIEW_TEMPLATE,
     "food-description-review": DESC_REVIEW_TEMPLATE,
     "food-judge": JUDGE_TEMPLATE,
