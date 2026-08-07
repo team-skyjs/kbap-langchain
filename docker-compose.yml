@@ -1,0 +1,12 @@
+# 로컬 벡터 검색 예제용. Langfuse 는 클라우드(.env)를 쓴다.
+#   docker compose up -d
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333" # REST + Web UI (http://localhost:6333/dashboard)
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:
