@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import logging
 import os
+from contextlib import nullcontext
+from datetime import datetime
 
 from kbap_review.config import load_config
 from kbap_review.graph import build_graph
@@ -18,7 +20,11 @@ async def run_batch(graph, foods: list[dict], concurrency: int, callbacks: list)
 
     async def one(food: dict):
         async with sem:
-            return await graph.ainvoke({"food": food}, config={"callbacks": callbacks})
+            # food_id 는 트레이스 메타데이터로 — Langfuse UI 에서 특정 음식 건 필터링용
+            return await graph.ainvoke(
+                {"food": food},
+                config={"callbacks": callbacks, "metadata": {"food_id": food.get("foodId")}},
+            )
 
     results = await asyncio.gather(*(one(f) for f in foods), return_exceptions=True)
 
@@ -49,13 +55,24 @@ async def run_batch(graph, foods: list[dict], concurrency: int, callbacks: list)
     return counts
 
 
-def make_callbacks() -> list:
+def make_tracing(dry_run: bool):
+    """Langfuse 콜백과 트레이스 속성 컨텍스트를 만든다. 키가 없으면 둘 다 no-op.
+
+    langfuse 임포트는 load_dotenv() 이후여야 하므로 함수 안에서 한다.
+    """
     # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST 환경변수로 연결
     if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
-        return []
+        return [], nullcontext()
+    from langfuse import propagate_attributes
     from langfuse.langchain import CallbackHandler
 
-    return [CallbackHandler()]
+    ctx = propagate_attributes(
+        # 배치 실행 1회 = 세션 1개. Sessions 뷰에서 같은 실행의 음식들이 묶여 보인다.
+        trace_name="review-food",
+        session_id=f"review-{datetime.now():%Y%m%d-%H%M%S}",
+        tags=["dry-run"] if dry_run else [],
+    )
+    return [CallbackHandler()], ctx
 
 
 async def main() -> None:
@@ -76,8 +93,15 @@ async def main() -> None:
             return
         log.info("검수 대상 %d건 (dry_run=%s)", len(foods), args.dry_run)
         graph = build_graph(make_scorers(config), client, config.thresholds, dry_run=args.dry_run)
-        counts = await run_batch(graph, foods, config.concurrency, make_callbacks())
+        callbacks, trace_ctx = make_tracing(args.dry_run)
+        with trace_ctx:
+            counts = await run_batch(graph, foods, config.concurrency, callbacks)
         log.info("완료: %s", counts)
+        if callbacks:
+            # 배치 종료 직전 미전송 트레이스 강제 전송 — atexit만 믿으면 마지막 배치가 유실될 수 있다.
+            from langfuse import get_client
+
+            get_client().flush()
     finally:
         await client.aclose()
 
