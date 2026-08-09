@@ -14,9 +14,7 @@ from pydantic import BaseModel
 
 
 # structured output은 필드 순서대로 생성되므로 reason을 corrected보다 앞에 둔다.
-# 모델이 근거를 먼저 세운 뒤 교정명을 생성하게 한다(scoring.FieldScore와 같은 이유).
-# 비음식(is_food) 판정은 그래프의 이름 검수 노드(content.NameReview)로 이관됐다 —
-# 정제는 고치는 일만 한다.
+# 정제는 고치는 일만 한다 — 비음식 판정은 그래프의 이름 검수(content.NameReview)가 맡는다.
 class NameFix(BaseModel):
     reason: str
     corrected: str

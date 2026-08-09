@@ -47,17 +47,15 @@ from kbap.review import (
 )
 
 
-# 이름 검수 결과. 점수가 아니라 통과/불통과다 — 이름 정제는 "맞냐 틀리냐"지 등급을 매길
-# 대상이 아니다. is_food 를 passed 와 분리한 이유: 비음식("사리 추가")은 이름을 다시
-# 고쳐도 음식이 안 되므로 재정제 루프 없이 즉시 종료해 콜을 아낀다. 불통과만 재정제한다.
+# is_food 를 passed 와 분리한 이유: 비음식은 재정제해도 음식이 안 되므로
+# 재정제 루프 없이 즉시 종료해 콜을 아낀다.
 class NameReview(BaseModel):
     reason: str
     is_food: bool
     passed: bool
 
 
-# 설명 검수 — 1~3점의 명확한 기준(3 사실·자연스러움 / 2 사소한 결함 / 1 사실 오류).
-# 0~100 점수는 기준이 모호해 임계값 근처 판정이 흔들렸다. 3점만 통과다.
+# 설명 검수는 1~3점, 3점만 통과 — 0~100은 기준이 모호해 임계값 근처 판정이 흔들렸다.
 DESC_PASS_SCORE = 3
 
 
@@ -66,7 +64,6 @@ class DescReview(BaseModel):
     score: int = Field(ge=1, le=3)
 
 
-# 기피성분 검수 — 안전 데이터라 등급이 아니라 통과/불통과로 명확히 판단한다.
 class IngredientsReview(BaseModel):
     reason: str
     passed: bool
@@ -84,12 +81,10 @@ class JudgeVerdict(BaseModel):
 class ContentFns(NamedTuple):
     clean_name: Callable[[str, str], Awaitable[dict]]  # (원본, 검수 탈락 피드백)
     review_name: Callable[[str, str], Awaitable[NameReview]]  # (스캔 원본, 정제된 이름)
-    # 이름 번역은 검수·재시도 루프가 없어 피드백 파라미터도 없다 — 9키 전수는 pydantic이 보장.
     generate_name_translations: Callable[[str], Awaitable[dict]]
     generate_description: Callable[[str, str], Awaitable[str]]
     generate_description_translations: Callable[[str, str], Awaitable[dict]]
     generate_ingredients: Callable[[str, str], Awaitable[dict]]
-    # 벡터 검색 메타데이터용 — 검수 루프가 없어 피드백 파라미터도 없다.
     generate_long_description: Callable[[str], Awaitable[str]]
     review_description: Callable[[str, str], Awaitable[DescReview]]  # 한국어 설명만 검수
     review_ingredients: Callable[[str, dict], Awaitable[IngredientsReview]]
@@ -122,7 +117,6 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     name_max_attempts 는 이름 정제의 총 실행 횟수 상한(초회 포함)이다."""
 
     # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다.
-    # 재실행 시 검수 탈락 사유(name_feedback)를 프롬프트에 넣어 개선을 유도한다.
     async def clean_name(state: ContentState):
         fix = await fns.clean_name(state["food_name"], state.get("name_feedback", ""))
         return {
@@ -131,7 +125,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
             "name_attempts": state.get("name_attempts", 0) + 1,
         }
 
-    # ①' 이름 검수 — 단일 음식 메뉴명인지(is_food)와 정제 품질(score)을 판정한다.
+    # ①' 이름 검수 — 단일 음식 메뉴명인지(is_food)·그대로 써도 되는지(passed) 판정한다.
     # 여기를 통과해야만 생성 분기가 시작된다.
     async def review_name(state: ContentState):
         r = await fns.review_name(state["food_name"], state["cleaned_name"])
@@ -172,13 +166,12 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         desc = await fns.generate_description(state["cleaned_name"], state.get("description_feedback", ""))
         return {"description": desc, "description_attempts": state.get("description_attempts", 0) + 1}
 
-    # 설명 검수 — 한국어 설명만 본다. 번역 생성보다 먼저 실행해, 탈락한 설명의 번역을
-    # 만들지 않는다(설명이 확정된 뒤 번역은 정확히 1회).
+    # 설명 검수 — 한국어 설명만 본다. 번역보다 먼저 실행해 탈락한 설명의 번역을 만들지 않는다.
     async def review_description(state: ContentState):
         score = await fns.review_description(state["cleaned_name"], state["description"])
         return {"description_score": score, "description_feedback": score.reason}
 
-    # 설명 번역 생성(분기 2 후속) — 검수를 통과해 확정된 설명으로 1회만 생성한다
+    # 설명 번역 생성(분기 2 후속) — 확정된 설명으로 1회만
     async def generate_description_translations(state: ContentState):
         tr = await fns.generate_description_translations(state["cleaned_name"], state["description"])
         return {"description_translations": tr}
@@ -188,7 +181,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         ing = await fns.generate_ingredients(state["cleaned_name"], state.get("ingredient_feedback", ""))
         return {"ingredients": ing, "ingredient_attempts": state.get("ingredient_attempts", 0) + 1}
 
-    # 기피성분·매운맛 검수 — 관련 없는 재료·비취급 재료·주요 성분 누락이면 불통과, 재생성한다
+    # 기피성분·매운맛 검수(분기 3 후속) — 불통과면 재생성
     async def review_ingredients(state: ContentState):
         r = await fns.review_ingredients(state["cleaned_name"], state["ingredients"])
         return {"ingredient_review": r, "ingredient_feedback": r.reason}
