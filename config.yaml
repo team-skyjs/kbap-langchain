@@ -12,6 +12,5 @@ llm:
   timeout_seconds: 120 # LLM 호출 타임아웃. 모델이 느려지면 이 값을 조정
 thresholds: # 필드군별 통과 임계값 — 운영 중 조정
   description: 70
-  translations: 60
   avoidance: 70
 concurrency: 5

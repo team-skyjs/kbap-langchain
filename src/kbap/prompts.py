@@ -296,35 +296,6 @@ REVIEW_DESCRIPTION_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입�
 
 score(0~100)와 reason(한국어 한 문장)을 반환하세요."""
 
-REVIEW_TRANSLATIONS_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한국 음식의 이름·설명 번역을 언어별로
-0~100점으로 채점하세요.
-
-형식 검증은 이미 끝났습니다 — 글자 수, 번역 누락 여부, 등급 범위는
-보지 마세요. 오직 내용이 맞는가만 판단하세요.
-
-채점 기준 (언어별로 각각) — 오역을 잡는 것이 목적입니다:
-- 이름 번역이 이 음식을 제대로 가리키는가. 글자만 옮겨 뜻이 달라지지 않았는가
-  (예: 다른 요리 이름이 되어버림, 재료명을 엉뚱하게 옮김)
-- 설명 번역이 한국어 원문과 같은 내용인가. 원문에 없는 재료·조리법을 지어내거나,
-  원문에 있는 핵심 정보를 빠뜨리거나, 뜻을 뒤집지 않았는가
-- 그 언어 화자가 읽었을 때 말이 되는가 (기계번역 티가 나는 어색한 직역인가)
-- lang 이 가리키는 언어로 실제로 쓰여 있는가 (예: th 자리에 영어가 들어가 있으면 0점)
-
-음식 이름(한국어): {{name}}
-설명(한국어): {{description}}
-이름 번역: {{name_translations}}
-설명 번역: {{description_translations}}
-
-출력 규칙 — 반드시 지키세요:
-- items 배열은 **정확히 {{lang_count}}개** 항목이어야 합니다. 하나라도 빠지면 안 됩니다.
-- 아래 순서 그대로, 이 lang 값을 문자 그대로 사용하세요: {{langs}}
-- 여러 언어를 한 항목으로 합치거나, 점수가 같다는 이유로 생략하지 마세요.
-  점수가 같아도 {{lang_count}}개를 각각 적으세요.
-- 판단이 어려운 언어도 건너뛰지 말고, 확신이 없으면 낮은 점수를 주세요.
-  빠뜨린 언어는 0점으로 간주되어 멀쩡한 번역까지 폐기됩니다.
-
-각 항목은 lang, score(0~100), reason(한국어 한 문장)입니다."""
-
 REVIEW_AVOIDANCE_TEMPLATE = """당신은 식품 안전 검수자입니다. 아래 음식의 기피성분 목록과 매운맛 등급이
 일반적인 레시피 기준으로 타당한지 0~100점으로 채점하세요.
 
@@ -380,7 +351,6 @@ PROMPTS = {
     "food-ingredients-review": INGREDIENTS_REVIEW_TEMPLATE,
     "food-judge": JUDGE_TEMPLATE,
     "food-review-description": REVIEW_DESCRIPTION_TEMPLATE,
-    "food-review-translations": REVIEW_TRANSLATIONS_TEMPLATE,
     "food-review-ingredients": REVIEW_AVOIDANCE_TEMPLATE,
 }
 
