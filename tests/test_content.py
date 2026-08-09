@@ -11,6 +11,7 @@ from kbap.content import (
     ContentFns,
     DescGen,
     JudgeVerdict,
+    LongDescGen,
     Translations,
     build_content_graph,
     build_ingest_payload,
@@ -49,6 +50,10 @@ def build_fns(rec, name_translation_seq=(90,), description_seq=(90,), ingredient
         rec["generate_ingredients"].append((name, feedback))
         return {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3}
 
+    async def generate_long_description(name):
+        rec["generate_long_description"].append(name)
+        return "돼지고기와 신김치를 넣고 끓인 한국의 대표 찌개 요리. 얼큰하고 시원한 국물이 특징이다."
+
     async def review_name_translations(name, translations):
         score = name_translation_seq_scores.pop(0)
         return FieldScore(score=score, reason=f"이름번역 {score}")
@@ -73,6 +78,7 @@ def build_fns(rec, name_translation_seq=(90,), description_seq=(90,), ingredient
         generate_description=generate_description,
         generate_description_translations=generate_description_translations,
         generate_ingredients=generate_ingredients,
+        generate_long_description=generate_long_description,
         review_name_translations=review_name_translations,
         review_description=review_description,
         review_ingredients=review_ingredients,
@@ -94,9 +100,11 @@ async def test_happy_path_populates_all_content():
     assert state["description"].startswith("돼지고기")
     assert state["description_translations"]["en"].startswith("A stew")
     assert state["ingredients"]["spiciness"] == 3
+    assert state["long_description"].startswith("돼지고기와 신김치")
     assert state["verdict"].passed is True
     # 생성은 각각 한 번, 종합 판정은 join 후 정확히 한 번 실행한다
     assert len(rec["generate_description"]) == 1
+    assert len(rec["generate_long_description"]) == 1
     assert len(rec["judge"]) == 1
 
 
@@ -132,6 +140,7 @@ async def test_non_food_ends_graph_without_generation():
     assert rec["gen_nt"] == []
     assert rec["generate_description"] == []
     assert rec["generate_ingredients"] == []
+    assert rec["generate_long_description"] == []
     assert rec["judge"] == []  # LLM 종합 판정도 건너뛴다
 
 
@@ -150,6 +159,7 @@ async def test_generators_receive_cleaned_name():
     assert rec["gen_nt"][0][0] == "김치찌개"
     assert rec["generate_description"][0][0] == "김치찌개"
     assert rec["generate_ingredients"][0][0] == "김치찌개"
+    assert rec["generate_long_description"][0] == "김치찌개"
 
 
 async def test_review_fail_retries_generation_once_with_feedback():
@@ -189,6 +199,8 @@ async def test_independent_branches_do_not_retry_each_other():
     assert len(rec["generate_ingredients"]) == 2
     assert len(rec["generate_description"]) == 1
     assert len(rec["gen_nt"]) == 1
+    # 검수 루프가 없는 긴 설명은 다른 분기의 재시도에 휘말리지 않는다.
+    assert len(rec["generate_long_description"]) == 1
 
 
 # ===== kbap 적재 페이로드 =====
@@ -203,6 +215,7 @@ def test_ingest_payload_passed_maps_contract_fields():
         "name_translations": {"en": "Kimchi Stew"},
         "description_translations": {"en": "A stew"},
         "ingredients": {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3},
+        "long_description": "돼지고기와 신김치를 넣고 끓인 찌개. 얼큰한 국물이 특징이다.",
         "verdict": JudgeVerdict(reason="ok", passed=True),
     }
 
@@ -214,6 +227,7 @@ def test_ingest_payload_passed_maps_contract_fields():
         "nameTranslations": {"en": "Kimchi Stew"},
         "descriptionTranslations": {"en": "A stew"},
         "ingredients": [{"code": "PORK", "inclusion_percent": 95}],  # 계약 키는 snake_case
+        "longDescription": "돼지고기와 신김치를 넣고 끓인 찌개. 얼큰한 국물이 특징이다.",
     }
 
 
@@ -261,6 +275,22 @@ def test_valid_substances_keeps_first_on_duplicate():
 
 
 # ===== 생성 결과 형식 검증 (스프링 LLM 경계 require 이관) =====
+
+
+def test_long_desc_gen_rejects_over_500_chars():
+    with pytest.raises(ValidationError):
+        LongDescGen(long_description="가" * 501)
+
+
+def test_long_desc_gen_rejects_blank():
+    with pytest.raises(ValidationError):
+        LongDescGen(long_description="   ")
+
+
+def test_long_desc_gen_keeps_multi_sentence_periods():
+    # 디스플레이 설명과 달리 여러 문장이므로 마침표를 제거하지 않는다.
+    text = "돼지고기와 신김치를 넣고 끓인 찌개. 얼큰한 국물이 특징이다."
+    assert LongDescGen(long_description=f"  {text}  ").long_description == text
 
 
 def test_desc_gen_rejects_over_255_chars():
@@ -340,6 +370,7 @@ class FakeGraph:
             "name_translations": {"en": "x"},
             "description_translations": {"en": "y"},
             "ingredients": {"substances": [{"code": "PORK", "inclusionPercent": 95}], "spiciness": 3},
+            "long_description": f"{name} 상세 설명. 여러 문장이다.",
             "verdict": self.verdict,
         }
 

@@ -76,6 +76,25 @@ items: 음식명을 9개 언어로 번역한 값
 - 파스타·피자 같은 외래 음식은 각 언어의 통용 표기를 그대로 쓴다.
 - 그래도 모르는 음식이면 건너뛰지 말고 음식명의 구성 요소를 기준으로 번역한다.{{{{feedback_block}}}}"""
 
+LONG_DESC_TEMPLATE = """당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식의 검색용 상세 설명을 생성하세요.
+음식명: "{{name}}"
+
+## 생성 항목
+
+long_description: 한국어 상세 설명 (여러 문장, 500자 이하)
+- 벡터 검색의 메타데이터로 쓰입니다 — 화면에 노출되지 않으므로 홍보 문구가 아니라 사실 정보를 담으세요.
+- 다음 내용을 자연스러운 문장으로 포함하세요: 음식의 정의와 분류(국물·구이·면·볶음 등),
+  주재료와 부재료, 조리 방식, 맛의 특징(매운맛·간·식감), 함께 먹는 방식이나 곁들이는 음식,
+  흔히 불리는 다른 이름(있는 경우만).
+- 과장·추측 금지. 조리법이 여러 갈래면 가장 일반적인 방식 기준으로 쓰세요.
+- 반드시 500자 이하. 빈 값·"설명 준비 중" 같은 템플릿 문구 금지.
+
+## 규칙
+
+- 음식명에 오탈자·띄어쓰기 오류가 보이면 가장 유사한 실제 한식 메뉴로 추론해 그 음식
+  기준으로 작성하세요 (김치찌게 → 김치찌개). 상호·수식어가 붙어 있으면 음식 본체 기준.
+- 모르는 음식이어도 건너뛰지 말고 음식명의 구성 요소를 기준으로 작성하세요."""
+
 DESC_TEMPLATE = """당신은 한식 메뉴 데이터베이스 담당자입니다. 아래 음식의 한국어 한 줄 설명을 생성하세요.
 음식명: "{{name}}"
 
@@ -304,6 +323,7 @@ PROMPTS = {
     "food-namefix": NAMEFIX_TEMPLATE,
     "food-name-translation": NAME_TR_TEMPLATE,
     "food-description": DESC_TEMPLATE,
+    "food-long-description": LONG_DESC_TEMPLATE,
     "food-description-translation": DESC_TR_TEMPLATE,
     "food-ingredients": INGREDIENTS_GEN_TEMPLATE,
     "food-name-translation-review": NAME_TR_REVIEW_TEMPLATE,

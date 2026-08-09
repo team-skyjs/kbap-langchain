@@ -31,6 +31,7 @@ from kbap.prompts import (
     DESC_REVIEW_TEMPLATE,
     DESC_TEMPLATE,
     DESC_TR_TEMPLATE,
+    LONG_DESC_TEMPLATE,
     JUDGE_TEMPLATE,
     NAME_TR_REVIEW_TEMPLATE,
     NAME_TR_TEMPLATE,
@@ -64,6 +65,8 @@ class ContentFns(NamedTuple):
     generate_description: Callable[[str, str], Awaitable[str]]
     generate_description_translations: Callable[[str, str], Awaitable[dict]]
     generate_ingredients: Callable[[str, str], Awaitable[dict]]
+    # 벡터 검색 메타데이터용 — 검수 루프가 없어 피드백 파라미터도 없다.
+    generate_long_description: Callable[[str], Awaitable[str]]
     review_name_translations: Callable[[str, dict], Awaitable[FieldScore]]
     review_description: Callable[[str, str, dict], Awaitable[FieldScore]]
     review_ingredients: Callable[[str, dict], Awaitable[FieldScore]]
@@ -87,6 +90,7 @@ class ContentState(TypedDict, total=False):
     ingredient_score: FieldScore
     ingredient_attempts: int
     ingredient_feedback: str
+    long_description: str  # 벡터 검색 메타데이터 (화면 미노출)
     verdict: JudgeVerdict
 
 
@@ -106,11 +110,16 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
             )
         return out
 
-    # 부적합 판정이면 곧장 END, 아니면 3개 분기로 팬아웃한다
+    # 부적합 판정이면 곧장 END, 아니면 4개 분기로 팬아웃한다
     def route_after_clean(state: ContentState):
         if "verdict" in state:
             return END
-        return ["generate_name_translations", "generate_description", "generate_ingredients"]
+        return [
+            "generate_name_translations",
+            "generate_description",
+            "generate_ingredients",
+            "generate_long_description",
+        ]
 
     # ② 이름 번역 생성(분기 1) — 9개 언어. 재시도 시 탈락 사유(name_translation_feedback)를 프롬프트에 넣는다
     async def generate_name_translations(state: ContentState):
@@ -148,6 +157,12 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     async def review_ingredients(state: ContentState):
         score = await fns.review_ingredients(state["cleaned_name"], state["ingredients"])
         return {"ingredient_score": score, "ingredient_feedback": score.reason}
+
+    # ④' 검색용 긴 설명(분기 4) — 벡터 DB 메타데이터. 안전 직결이 아니라 검수·judge 판정에
+    # 참여하지 않는다. 검색 품질 문제가 실측되면 그때 검수를 붙인다.
+    async def generate_long_description(state: ContentState):
+        text = await fns.generate_long_description(state["cleaned_name"])
+        return {"long_description": text}
 
     # ⑤ 종합 판정 — 세 분기가 모두 끝난 뒤(defer) 점수·사유로 PASS/FAIL을 최종 결정한다.
     # 기피성분만은 결정론적 fail-closed: 프롬프트의 "임계값 미달은 탈락" 지시는 강제력이
@@ -188,6 +203,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_node("review_description", review_description, retry_policy=retry)
     g.add_node("generate_ingredients", generate_ingredients, retry_policy=retry)
     g.add_node("review_ingredients", review_ingredients, retry_policy=retry)
+    g.add_node("generate_long_description", generate_long_description, retry_policy=retry)
     # defer=True — 세 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다.
     g.add_node("judge", judge, defer=True, retry_policy=retry)
 
@@ -195,12 +211,19 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_conditional_edges(
         "clean_name",
         route_after_clean,
-        ["generate_name_translations", "generate_description", "generate_ingredients", END],
+        [
+            "generate_name_translations",
+            "generate_description",
+            "generate_ingredients",
+            "generate_long_description",
+            END,
+        ],
     )
     g.add_edge("generate_name_translations", "review_name_translations")
     g.add_edge("generate_description", "generate_description_translations")  # 설명을 재생성하면 번역도 함께 다시 만든다
     g.add_edge("generate_description_translations", "review_description")
     g.add_edge("generate_ingredients", "review_ingredients")
+    g.add_edge("generate_long_description", "judge")  # 검수 없이 join만 — judge는 defer라 4분기를 기다린다
     g.add_conditional_edges(
         "review_name_translations",
         _route("name_translation_score", "name_translation_attempts", thresholds.translations, "generate_name_translations"),
@@ -268,6 +291,21 @@ class IngredientsGen(BaseModel):
     spiciness: int = Field(ge=0, le=10)
 
 
+class LongDescGen(BaseModel):
+    long_description: str
+
+    @field_validator("long_description")
+    @classmethod
+    def _not_blank_or_over_limit(cls, v: str) -> str:
+        # DescGen과 달리 여러 문장이므로 마침표를 제거하지 않는다.
+        v = v.strip()
+        if not v or v == "설명 준비 중":
+            raise ValueError("상세 설명은 비거나 플레이스홀더일 수 없다")
+        if len(v) > 500:
+            raise ValueError("상세 설명은 500자 이하여야 한다")
+        return v
+
+
 class DescGen(BaseModel):
     description: str
 
@@ -327,6 +365,10 @@ def desc_prompt(name: str, feedback: str) -> str:
     return render_prompt(
         "food-description", DESC_TEMPLATE, name=name, feedback_block=_feedback_block(feedback)
     )
+
+
+def long_desc_prompt(name: str) -> str:
+    return render_prompt("food-long-description", LONG_DESC_TEMPLATE, name=name)
 
 
 def desc_tr_prompt(name: str, description: str) -> str:
@@ -416,6 +458,7 @@ def make_fns(
     judge_llm = _bind(init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict))
     tr_llm = _bind(gen_base.with_structured_output(Translations))
     desc_llm = _bind(gen_base.with_structured_output(DescGen))
+    long_desc_llm = _bind(gen_base.with_structured_output(LongDescGen))
     ingredients_llm = _bind(base.with_structured_output(IngredientsGen))
     score_llm = _bind(base.with_structured_output(FieldScore))
     tr_score_llm = _bind(base.with_structured_output(TranslationScores))
@@ -432,6 +475,10 @@ def make_fns(
     async def generate_description(name: str, feedback: str) -> str:
         result: DescGen = await desc_llm.ainvoke(desc_prompt(name, feedback))
         return result.description
+
+    async def generate_long_description(name: str) -> str:
+        result: LongDescGen = await long_desc_llm.ainvoke(long_desc_prompt(name))
+        return result.long_description
 
     async def generate_description_translations(name: str, description: str) -> dict:
         result: Translations = await tr_llm.ainvoke(desc_tr_prompt(name, description))
@@ -481,6 +528,7 @@ def make_fns(
         generate_description=generate_description,
         generate_description_translations=generate_description_translations,
         generate_ingredients=generate_ingredients,
+        generate_long_description=generate_long_description,
         review_name_translations=review_name_translations,
         review_description=review_description,
         review_ingredients=review_ingredients,
@@ -554,6 +602,8 @@ def build_ingest_payload(state: dict) -> dict:
             {"code": i["code"], "inclusion_percent": i["inclusionPercent"]}
             for i in ingredients["substances"]
         ],
+        # 계약 미확정 필드 — POST 복원 전에 적재 계약(agenthub)에 longDescription 추가 합의 필요.
+        "longDescription": state["long_description"],
     }
 
 
