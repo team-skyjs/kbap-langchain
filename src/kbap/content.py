@@ -10,6 +10,7 @@ kbap(Spring) 콘텐츠 배치가 하던 생성·검수를 이 그래프가 전�
 
 SQS 메시지 계약(초안): body = {"scannedName": <str>, "foodId": <int, 선택>}
 foodId 는 DB 저장 후 발행하는 경우에만 실린다 — 없으면 이름이 식별자.
+처리 결과는 kbap 적재 API로 POST 한다 — 계약은 agenthub wiki/langchain-food-ingest-contract.md.
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
 from collections.abc import Awaitable, Callable
@@ -52,6 +53,9 @@ class JudgeVerdict(BaseModel):
     reason: str
     passed: bool
     rejected_fields: list[str] = []
+    # kbap 적재 계약의 failureKind — LLM 출력이 아니라 세 생성 지점의 코드가 찍는다.
+    # (정제 조기 종료→NOT_FOOD, 기피성분 가드→INGREDIENT_GUARD, 그 외 judge 탈락→JUDGE_REJECTED)
+    failure_kind: str | None = None
 
 
 class ContentFns(NamedTuple):
@@ -97,7 +101,9 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
         out: ContentState = {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
         if fix.get("method") == "rejected":
             reason = fix.get("reason", "") or "음식 메뉴명이 아님"
-            out["verdict"] = JudgeVerdict(passed=False, reason=f"콘텐츠 생성 부적합: {reason}")
+            out["verdict"] = JudgeVerdict(
+                passed=False, reason=f"콘텐츠 생성 부적합: {reason}", failure_kind="NOT_FOOD"
+            )
         return out
 
     # 부적합 판정이면 곧장 END, 아니면 3개 분기로 팬아웃한다
@@ -148,6 +154,9 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     # 없고, 알레르기 데이터는 오통과가 누락보다 위험하다(valid_substances 필터와 같은 철학).
     async def judge(state: ContentState):
         verdict = await fns.judge(dict(state))
+        if not verdict.passed:
+            # LLM 출력의 failure_kind 는 신뢰하지 않고 덮어쓴다 — 계약 밖 enum 값 차단.
+            verdict = verdict.model_copy(update={"failure_kind": "JUDGE_REJECTED"})
         ingredient = state["ingredient_score"]
         if verdict.passed and ingredient.score < thresholds.avoidance:
             verdict = JudgeVerdict(
@@ -155,6 +164,7 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
                 reason=f"기피성분 {ingredient.score}점 < 임계값 {thresholds.avoidance}: "
                 f"{ingredient.reason}",
                 rejected_fields=["avoidance"],
+                failure_kind="INGREDIENT_GUARD",
             )
         return {"verdict": verdict}
 
@@ -518,8 +528,39 @@ def _cached_graph():
     return _graph
 
 
-async def process_event(event: dict, graph, concurrency: int, callbacks: list = []) -> list[str]:
-    """레코드를 동시에 처리하고 실패한 messageId 목록을 반환한다."""
+def build_ingest_payload(state: dict) -> dict:
+    """그래프 최종 상태 → kbap 적재 계약 요청 본문 (agenthub wiki/langchain-food-ingest-contract.md).
+
+    displayName 은 스캔 원본이 아닌 정제된 이름이다 — 콘텐츠가 그 이름 기준으로
+    생성됐고, 스캔 노이즈("김치찌게 8,000원")가 DB 행 이름이 되면 안 된다.
+    """
+    verdict = state["verdict"]
+    if not verdict.passed:
+        return {
+            "displayName": state["cleaned_name"],
+            "passed": False,
+            "failureKind": verdict.failure_kind,
+            "reason": verdict.reason,
+        }
+    ingredients = state["ingredients"]
+    return {
+        "displayName": state["cleaned_name"],
+        "passed": True,
+        "description": state["description"],
+        "spiciness": ingredients["spiciness"],
+        "nameTranslations": state["name_translations"],
+        "descriptionTranslations": state["description_translations"],
+        "ingredients": [
+            {"code": i["code"], "inclusion_percent": i["inclusionPercent"]}
+            for i in ingredients["substances"]
+        ],
+    }
+
+
+async def process_event(
+    event: dict, graph, kbap, concurrency: int, callbacks: list = []
+) -> list[str]:
+    """레코드를 동시에 처리해 kbap에 적재하고 실패한 messageId 목록을 반환한다."""
     sem = asyncio.Semaphore(concurrency)
 
     async def one(record: dict) -> str | None:
@@ -537,10 +578,23 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
                     {"food_name": name}, config={"callbacks": callbacks}
                 )
             except Exception:
+                # 런타임 에러는 POST 없이 재시도로 — FAILED에 인프라 장애를 섞지 않는다(계약 전제).
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
                 return message_id
         verdict = result["verdict"]
-        # TODO(kbap 계약 확정 시): PASS/FAIL과 사유를 결과 반영 API로 POST — 멱등성을 보장해야 한다.
+        # 프롬프트 튜닝 기간이라 적재 POST 를 잠시 끈다 — 응답 필드가 아직 바뀔 수 있다.
+        # 보냈을 본문은 로그로 남겨 CloudWatch 에서 필드 변화를 검토한다.
+        # 튜닝이 끝나면 아래 블록 주석을 해제하고 이 로그 한 줄과 관련 테스트 skip 을 되돌린다.
+        log.info(
+            "적재 페이로드(전송 안 함): %s",
+            json.dumps(build_ingest_payload(result), ensure_ascii=False),
+        )
+        # try:
+        #     await kbap.post_food_content(build_ingest_payload(result))
+        # except Exception:
+        #     # 서버가 멱등이라 재시도 안전. 3회 소진(409 소프트 삭제 충돌 등)이면 DLQ로.
+        #     log.exception("적재 실패 foodId=%s (%s)", food_id, name)
+        #     return message_id
         log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
         return None
 
@@ -548,10 +602,23 @@ async def process_event(event: dict, graph, concurrency: int, callbacks: list = 
     return [message_id for message_id in results if message_id]
 
 
+async def _consume(event, graph, concurrency: int, callbacks: list) -> list[str]:
+    # invoke마다 이벤트 루프가 새로 생기므로 httpx 클라이언트는 루프 단위로 만들고 닫는다.
+    from kbap.review import KbapClient
+
+    with open(os.environ.get("CONFIG_PATH", "config.yaml")) as f:
+        raw = yaml.safe_load(f)
+    kbap = KbapClient(raw["kbap_api"]["base_url"], os.environ["KBAP_API_TOKEN"])
+    try:
+        return await process_event(event, graph, kbap, concurrency, callbacks)
+    finally:
+        await kbap.aclose()
+
+
 def handler(event, context):
     graph = _cached_graph()
     concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
-    failed = asyncio.run(process_event(event, graph, concurrency, make_callbacks()))
+    failed = asyncio.run(_consume(event, graph, concurrency, make_callbacks()))
 
     # Lambda는 응답 반환 후 프로세스를 멈추므로 atexit이 호출되지 않아 여기서 직접 flush한다.
     from langfuse import get_client
