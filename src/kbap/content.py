@@ -52,12 +52,13 @@ from kbap.review import (
 )
 
 
-# 이름 검수 결과. is_food 를 score 와 분리한 이유: 비음식("사리 추가")은 이름을 다시
-# 고쳐도 음식이 안 되므로 재정제 루프 없이 즉시 종료해 콜을 아낀다. score 미달만 재정제한다.
+# 이름 검수 결과. 점수가 아니라 통과/불통과다 — 이름 정제는 "맞냐 틀리냐"지 등급을 매길
+# 대상이 아니다. is_food 를 passed 와 분리한 이유: 비음식("사리 추가")은 이름을 다시
+# 고쳐도 음식이 안 되므로 재정제 루프 없이 즉시 종료해 콜을 아낀다. 불통과만 재정제한다.
 class NameReview(BaseModel):
     reason: str
     is_food: bool
-    score: int = Field(ge=0, le=100)
+    passed: bool
 
 
 class JudgeVerdict(BaseModel):
@@ -139,12 +140,12 @@ def build_content_graph(
             )
         }
 
-    # 비음식은 재정제해도 음식이 안 되므로 즉시 거절, 품질 미달만 재정제 루프를 탄다.
+    # 비음식은 재정제해도 음식이 안 되므로 즉시 거절, 불통과만 재정제 루프를 탄다.
     def route_after_review_name(state: ContentState):
         r = state["name_review"]
         if not r.is_food:
             return "reject_name"
-        if r.score < thresholds.name:
+        if not r.passed:
             if state["name_attempts"] < name_max_attempts:
                 return "clean_name"
             return "reject_name"

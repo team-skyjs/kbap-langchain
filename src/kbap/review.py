@@ -28,8 +28,6 @@ from pydantic import ValidationError
 class Thresholds(BaseModel):
     # 모델 점수가 0~100이므로 임계값도 같은 범위여야 한다. 음수면 모두 통과해
     # 기피성분 미달 건까지 REVIEWED로 넘어가고, 100을 초과하면 모두 탈락한다.
-    # name 은 콘텐츠 그래프의 이름 검수 전용이라 검수 배치(config 없이도) 기본값을 둔다.
-    name: int = Field(default=70, ge=0, le=100)
     description: int = Field(ge=0, le=100)
     translations: int = Field(ge=0, le=100)
     avoidance: int = Field(ge=0, le=100)

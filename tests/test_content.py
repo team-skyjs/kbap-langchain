@@ -21,15 +21,15 @@ from kbap.content import (
 )
 from kbap.review import TARGET_LANGS, FieldScore, Thresholds
 
-TH = Thresholds(name=70, description=70, translations=70, avoidance=70)
+TH = Thresholds(description=70, translations=70, avoidance=70)
 
 
 # ===== 그래프 배선·재시도 =====
 
 
-def build_fns(rec, name_review_seq=(90,), name_translation_seq=(90,), description_seq=(90,), ingredient_seq=(90,)):
-    """호출 기록(rec)과 검수 점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
-    name_review_scores, name_translation_seq_scores, description_seq_scores, ingredient_scores = (
+def build_fns(rec, name_review_seq=(True,), name_translation_seq=(90,), description_seq=(90,), ingredient_seq=(90,)):
+    """호출 기록(rec)과 검수 통과/점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
+    name_review_results, name_translation_seq_scores, description_seq_scores, ingredient_scores = (
         list(name_review_seq), list(name_translation_seq), list(description_seq), list(ingredient_seq)
     )
 
@@ -39,8 +39,8 @@ def build_fns(rec, name_review_seq=(90,), name_translation_seq=(90,), descriptio
 
     async def review_name(original, cleaned):
         rec["review_name"].append((original, cleaned))
-        score = name_review_scores.pop(0)
-        return NameReview(reason=f"이름 {score}", is_food=True, score=score)
+        passed = name_review_results.pop(0)
+        return NameReview(reason=f"이름검수{len(rec['review_name'])}", is_food=True, passed=passed)
 
     async def generate_name_translations(name, feedback):
         rec["gen_nt"].append((name, feedback))
@@ -141,7 +141,7 @@ async def test_non_food_ends_graph_without_generation_or_retry():
 
     async def non_food_review(original, cleaned):
         rec["review_name"].append((original, cleaned))
-        return NameReview(reason="옵션 항목", is_food=False, score=0)
+        return NameReview(reason="옵션 항목", is_food=False, passed=False)
 
     fns = build_fns(rec)._replace(review_name=non_food_review)
     graph = build_content_graph(fns, TH)
@@ -161,9 +161,9 @@ async def test_non_food_ends_graph_without_generation_or_retry():
 async def test_name_review_fail_retries_clean_with_feedback():
     # 이름 검수 탈락 사유가 재정제 프롬프트로 전달돼야 한다.
     rec = defaultdict(list)
-    state = await run(rec, name_review_seq=(30, 90))
+    state = await run(rec, name_review_seq=(False, True))
 
-    assert [feedback for (_, feedback) in rec["clean"]] == ["", "이름 30"]
+    assert [feedback for (_, feedback) in rec["clean"]] == ["", "이름검수1"]
     assert len(rec["review_name"]) == 2
     assert state["verdict"].passed is True
     # 검수를 통과한 뒤에만 후행 분기가 정확히 한 번 실행된다.
@@ -172,9 +172,9 @@ async def test_name_review_fail_retries_clean_with_feedback():
 
 
 async def test_name_review_exhausted_rejects_as_not_food():
-    # 정제 3회(초회 포함) 후에도 검수 미달이면 NOT_FOOD 로 종료하고 생성은 시작하지 않는다.
+    # 정제 3회(초회 포함) 후에도 검수 불통과면 NOT_FOOD 로 종료하고 생성은 시작하지 않는다.
     rec = defaultdict(list)
-    state = await run(rec, name_review_seq=(30, 30, 30))
+    state = await run(rec, name_review_seq=(False, False, False))
 
     assert len(rec["clean"]) == 3
     assert state["verdict"].passed is False
