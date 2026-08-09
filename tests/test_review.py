@@ -15,20 +15,16 @@ from kbap.review import (
     KbapClient,
     Scorers,
     Thresholds,
-    TranslationLangScore,
-    TranslationScores,
     Verdict,
     avoidance_prompt,
     build_graph,
     decide,
     description_prompt,
-    lang_scores,
     load_config,
     run_batch,
-    translations_prompt,
 )
 
-TH = Thresholds(description=70, translations=70, avoidance=70)
+TH = Thresholds(description=70, avoidance=70)
 
 
 # ===== 설정 =====
@@ -44,7 +40,6 @@ def test_load_config(tmp_path, monkeypatch):
           avoidance_model: gpt-5-mini
         thresholds:
           description: 70
-          translations: 75
           avoidance: 80
         concurrency: 3
     """))
@@ -57,7 +52,6 @@ def test_load_config(tmp_path, monkeypatch):
     assert cfg.model == "gemini-2.5-flash"
     assert cfg.avoidance_model == "gpt-5-mini"
     assert cfg.thresholds.description == 70
-    assert cfg.thresholds.translations == 75
     assert cfg.thresholds.avoidance == 80
     assert cfg.concurrency == 3
 
@@ -71,7 +65,6 @@ def test_avoidance_model_defaults_to_model(tmp_path, monkeypatch):
           model: gemini-2.5-flash
         thresholds:
           description: 70
-          translations: 70
           avoidance: 70
         concurrency: 5
     """))
@@ -89,7 +82,6 @@ def test_timeout_seconds_defaults_to_120(tmp_path, monkeypatch):
           model: gemini-2.5-flash
         thresholds:
           description: 70
-          translations: 70
           avoidance: 70
         concurrency: 5
     """))
@@ -108,7 +100,6 @@ def test_timeout_seconds_is_configurable(tmp_path, monkeypatch):
           timeout_seconds: 45
         thresholds:
           description: 70
-          translations: 70
           avoidance: 70
         concurrency: 5
     """))
@@ -130,7 +121,7 @@ def _write(tmp_path, thresholds: str, concurrency: int):
     return str(cfg)
 
 
-OK_THRESHOLDS = "  description: 70\n  translations: 70\n  avoidance: 70\n"
+OK_THRESHOLDS = "  description: 70\n  avoidance: 70\n"
 
 
 def test_rejects_nonpositive_concurrency(tmp_path, monkeypatch):
@@ -144,9 +135,9 @@ def test_rejects_threshold_outside_score_range(tmp_path, monkeypatch):
     # 임계값이 음수면 모두 통과하고 100을 초과하면 모두 탈락한다.
     monkeypatch.setenv("KBAP_API_TOKEN", "t")
     with pytest.raises(ValidationError):
-        load_config(_write(tmp_path, "  description: -1\n  translations: 70\n  avoidance: 70\n", 5))
+        load_config(_write(tmp_path, "  description: -1\n  avoidance: 70\n", 5))
     with pytest.raises(ValidationError):
-        load_config(_write(tmp_path, "  description: 70\n  translations: 70\n  avoidance: 101\n", 5))
+        load_config(_write(tmp_path, "  description: 70\n  avoidance: 101\n", 5))
 
 
 # ===== kbap 클라이언트 =====
@@ -269,28 +260,10 @@ def test_field_score_rejects_out_of_range():
         FieldScore(score=-1, reason="r")
 
 
-def test_translation_scores_schema():
-    ts = TranslationScores(items=[{"lang": "en", "score": 90, "reason": "ok"}])
-    assert ts.items[0].lang == "en"
-
-
-def test_translation_lang_score_reason_optional():
-    # 통과 언어는 reason을 생략해 출력 토큰을 아낀다 — 스키마가 빈 값을 허용해야 한다.
-    ts = TranslationScores(items=[{"lang": "en", "score": 90}])
-    assert ts.items[0].reason == ""
-
-
 def test_description_prompt_contains_food():
     p = description_prompt(PROMPT_FOOD)
     assert "김치찌개" in p
     assert PROMPT_FOOD["description"] in p
-
-
-def test_translations_prompt_lists_all_target_langs():
-    p = translations_prompt(PROMPT_FOOD)
-    for lang in TARGET_LANGS:
-        assert lang in p
-    assert "Kimchi Stew" in p
 
 
 def test_avoidance_prompt_contains_substances_and_spiciness():
@@ -317,25 +290,6 @@ def test_field_score_puts_reason_before_score():
     assert list(FieldScore.model_fields) == ["reason", "score"]
 
 
-def test_lang_scores_backfills_missing_languages_with_zero():
-    result = TranslationScores(items=[TranslationLangScore(lang="en", score=90, reason="ok")])
-
-    scores = lang_scores(result)
-
-    assert set(scores.keys()) == set(TARGET_LANGS)
-    assert scores["en"].score == 90
-    assert scores["ja"].score == 0
-    assert scores["ja"].reason == "모델 응답에서 언어 누락"
-
-
-def test_lang_scores_keeps_all_scores_when_response_is_complete():
-    items = [TranslationLangScore(lang=lang, score=80, reason="ok") for lang in TARGET_LANGS]
-
-    scores = lang_scores(TranslationScores(items=items))
-
-    assert {lang: s.score for lang, s in scores.items()} == {lang: 80 for lang in TARGET_LANGS}
-
-
 # ===== 종합판정(decide) =====
 
 
@@ -343,82 +297,49 @@ def fs(score: int, reason: str = "이유") -> FieldScore:
     return FieldScore(score=score, reason=reason)
 
 
-def all_pass_translations(score: int = 90) -> dict[str, FieldScore]:
-    return {lang: fs(score) for lang in TARGET_LANGS}
-
-
 def test_all_pass():
-    v = decide(fs(80), all_pass_translations(), fs(75), TH)
+    v = decide(fs(80), fs(75), TH)
     assert v.passed is True
     assert v.rejected_fields == []
     assert v.reason is None
     assert v.scores["description"] == 80
-    assert v.scores["translations"]["en"] == 90
     assert v.scores["avoidance"] == 75
 
 
 def test_threshold_is_inclusive():
     # 임계값과 같으면 통과 (70 >= 70)
-    v = decide(fs(70), all_pass_translations(70), fs(70), TH)
+    v = decide(fs(70), fs(70), TH)
     assert v.passed is True
 
 
 def test_description_fail_maps_to_kbap_field():
-    v = decide(fs(50), all_pass_translations(), fs(90), TH)
+    v = decide(fs(50), fs(90), TH)
     assert v.passed is False
     assert v.rejected_fields == ["DESCRIPTION"]
 
 
-def test_one_failing_language_rejects_both_translation_fields():
-    # 배치는 이름·설명 번역을 한꺼번에 재생성하므로 언어 하나만 나빠도 둘 다 비운다.
-    translations = all_pass_translations() | {"th": fs(30, "태국어 번역이 다른 음식을 지칭")}
-    v = decide(fs(90), translations, fs(90), TH)
-    assert v.passed is False
-    assert v.rejected_fields == ["NAME_TRANSLATIONS", "DESCRIPTION_TRANSLATIONS"]
-
-
 def test_avoidance_fail_clears_spiciness_too():
     # spiciness는 기피성분과 한 번에 산출되므로 함께 비운다.
-    v = decide(fs(90), all_pass_translations(), fs(40, "돼지고기 누락"), TH)
+    v = decide(fs(90), fs(40, "돼지고기 누락"), TH)
     assert v.passed is False
     assert v.rejected_fields == ["AVOIDANCE_SUBSTANCES", "SPICINESS"]
 
 
-def test_incomplete_translation_map_does_not_pass():
-    # 언어가 누락된 채 전달되어도 통과시키지 않는다(fail-closed).
-    v = decide(fs(90), {"en": fs(90)}, fs(90), TH)
-    assert v.passed is False
-    assert "NAME_TRANSLATIONS" in v.rejected_fields
-
-
 def test_reason_lists_every_failed_group():
-    v = decide(
-        fs(50, "설명이 다른 음식을 설명함"), all_pass_translations(), fs(40, "돼지고기 누락"), TH
-    )
+    v = decide(fs(50, "설명이 다른 음식을 설명함"), fs(40, "돼지고기 누락"), TH)
     assert "설명이 다른 음식을 설명함" in v.reason
     assert "돼지고기 누락" in v.reason
 
 
 def test_reason_capped():
-    translations = {lang: fs(10, "사" * 300) for lang in TARGET_LANGS}
-    v = decide(fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
+    v = decide(fs(10, "사" * 300), fs(10, "성" * 300), TH)
     assert len(v.reason) <= MAX_NOTE_CHARS
 
 
-def test_reason_keeps_description_and_avoidance_when_many_langs_fail():
-    # 한 줄짜리 그룹(설명·기피성분)은 언어별 사유보다 앞에 배치해 잘리지 않게 한다.
-    translations = {lang: fs(10, "사" * 300) for lang in TARGET_LANGS}
-    v = decide(fs(10, "설명 문제"), translations, fs(10, "성분 문제"), TH)
-    assert "설명 문제" in v.reason
-    assert "성분 문제" in v.reason
-
-
 def test_all_groups_fail():
-    v = decide(fs(10), {lang: fs(10) for lang in TARGET_LANGS}, fs(10), TH)
+    v = decide(fs(10), fs(10), TH)
     assert v.rejected_fields == [
         "DESCRIPTION",
-        "NAME_TRANSLATIONS",
-        "DESCRIPTION_TRANSLATIONS",
         "AVOIDANCE_SUBSTANCES",
         "SPICINESS",
     ]
@@ -438,17 +359,14 @@ class FakeClient:
         return {"foodId": food_id, "contentStatus": "REVIEWED" if verdict.passed else "INCOMPLETE"}
 
 
-def make_scorers(desc=85, trans=90, avoid=80) -> Scorers:
+def make_scorers(desc=85, avoid=80) -> Scorers:
     async def d(food):
         return FieldScore(score=desc, reason="설명 사유")
-
-    async def t(food):
-        return {lang: FieldScore(score=trans, reason="번역 사유") for lang in TARGET_LANGS}
 
     async def a(food):
         return FieldScore(score=avoid, reason="성분 사유")
 
-    return Scorers(description=d, translations=t, avoidance=a)
+    return Scorers(description=d, avoidance=a)
 
 
 async def test_pass_path_posts_with_food_id():
@@ -540,13 +458,10 @@ def scorers_failing_for(bad_id: int | None) -> Scorers:
             return FieldScore(score=30, reason="설명 문제")
         return FieldScore(score=90, reason="ok")
 
-    async def t(food):
-        return {lang: FieldScore(score=90, reason="ok") for lang in TARGET_LANGS}
-
     async def a(food):
         return FieldScore(score=90, reason="ok")
 
-    return Scorers(description=d, translations=t, avoidance=a)
+    return Scorers(description=d, avoidance=a)
 
 
 async def test_run_batch_counts_and_isolates_failures():

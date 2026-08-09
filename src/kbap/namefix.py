@@ -14,14 +14,9 @@ from pydantic import BaseModel
 
 
 # structured output은 필드 순서대로 생성되므로 reason을 corrected보다 앞에 둔다.
-# 모델이 근거를 먼저 세운 뒤 교정명을 생성하게 한다(scoring.FieldScore와 같은 이유).
+# 정제는 고치는 일만 한다 — 비음식 판정은 그래프의 이름 검수(content.NameReview)가 맡는다.
 class NameFix(BaseModel):
     reason: str
-    # 단일 음식 메뉴명이 아니면(옵션·카테고리 제목·판독 불가) False — 그래프가 생성 없이 끝낸다.
-    # 주의: strict structured output은 모든 필드를 필수로 만들어 모델이 이 값을 반드시 생성한다.
-    # 판정 기준은 프롬프트(food-namefix v4+)가 지시해야 하며, 기본 True는 스키마를 강제하지
-    # 않는 경로에서만 안전값으로 동작한다.
-    is_food: bool = True
     corrected: str
 
 
@@ -60,7 +55,7 @@ def snap(name: str, anchors: list[str], max_edits: int = 2) -> str | None:
     return None if tied else best
 
 
-Normalizer = Callable[[str], Awaitable[NameFix]]
+Normalizer = Callable[[str, str], Awaitable[NameFix]]
 
 _NON_HANGUL = re.compile(r"[^가-힣 ]")
 
@@ -80,14 +75,12 @@ def _plausible(corrected: str, original: str) -> bool:
 MAX_NAME_LENGTH = 20
 
 
-async def clean_one(name: str, anchors: list[str], normalize: Normalizer) -> dict:
+async def clean_one(name: str, anchors: list[str], normalize: Normalizer, feedback: str = "") -> dict:
+    """feedback 은 이름 검수 탈락 사유 — 재정제 시 프롬프트에 들어가 개선을 유도한다."""
     snapped = snap(name, anchors)
     if snapped is not None:
         return {"original": name, "name": snapped, "method": "snap", "reason": ""}
-    fix = await normalize(name)
-    if not fix.is_food:
-        # 옵션("사리 추가")·판독 불가 텍스트 — 콘텐츠 생성 대상이 아니므로 호출부가 걸러낸다.
-        return {"original": name, "name": name, "method": "rejected", "reason": fix.reason}
+    fix = await normalize(name, feedback)
     corrected = fix.corrected.strip()
     if (
         not corrected
@@ -118,10 +111,11 @@ async def clean_batch(
     ]
 
 
-def normalize_prompt(name: str) -> str:
+def normalize_prompt(name: str, feedback: str = "") -> str:
     from kbap.prompts import NAMEFIX_TEMPLATE, render_prompt
 
-    return render_prompt("food-namefix", NAMEFIX_TEMPLATE, name=name)
+    block = f"\n\n## 이전 시도 탈락 사유 — 반드시 반영해 다시 정제하세요\n{feedback}" if feedback else ""
+    return render_prompt("food-namefix", NAMEFIX_TEMPLATE, name=name, feedback_block=block)
 
 
 def make_normalizer(model_name: str, timeout: int, callbacks: list) -> Normalizer:
@@ -129,8 +123,12 @@ def make_normalizer(model_name: str, timeout: int, callbacks: list) -> Normalize
     from kbap.review import init_model
 
     llm = init_model(model_name, timeout).with_structured_output(NameFix)
+    # callbacks 가 비면 config 를 넘기지 않는다 — 빈 리스트를 명시하면 그래프 실행이
+    # 전파하는 트레이싱 콜백을 덮어써 이 LLM 콜만 트레이스에서 사라진다(content._bind 와 동일 규칙).
+    if callbacks:
+        llm = llm.with_config(callbacks=callbacks)
 
-    async def normalize(name: str) -> NameFix:
-        return await llm.ainvoke(normalize_prompt(name), config={"callbacks": callbacks})
+    async def normalize(name: str, feedback: str = "") -> NameFix:
+        return await llm.ainvoke(normalize_prompt(name, feedback))
 
     return normalize

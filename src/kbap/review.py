@@ -29,7 +29,6 @@ class Thresholds(BaseModel):
     # 모델 점수가 0~100이므로 임계값도 같은 범위여야 한다. 음수면 모두 통과해
     # 기피성분 미달 건까지 REVIEWED로 넘어가고, 100을 초과하면 모두 탈락한다.
     description: int = Field(ge=0, le=100)
-    translations: int = Field(ge=0, le=100)
     avoidance: int = Field(ge=0, le=100)
 
 
@@ -143,7 +142,6 @@ SULFITES(아황산류)"""
 from kbap.prompts import (
     REVIEW_AVOIDANCE_TEMPLATE,
     REVIEW_DESCRIPTION_TEMPLATE,
-    REVIEW_TRANSLATIONS_TEMPLATE,
     render_prompt,
 )
 
@@ -156,36 +154,12 @@ class FieldScore(BaseModel):
     score: int = Field(ge=0, le=100)
 
 
-class TranslationLangScore(BaseModel):
-    lang: str
-    # 통과 언어는 reason을 비워 출력 토큰을 아낀다 — 프롬프트가 기준 미만 언어만 쓰도록 지시한다.
-    reason: str = ""
-    score: int = Field(ge=0, le=100)
-
-
-class TranslationScores(BaseModel):
-    items: list[TranslationLangScore]
-
-
 def description_prompt(food: dict) -> str:
     return render_prompt(
         "food-review-description",
         REVIEW_DESCRIPTION_TEMPLATE,
         name=food["koreanName"],
         description=food["description"],
-    )
-
-
-def translations_prompt(food: dict) -> str:
-    return render_prompt(
-        "food-review-translations",
-        REVIEW_TRANSLATIONS_TEMPLATE,
-        name=food["koreanName"],
-        description=food["description"],
-        name_translations=json.dumps(food["nameTranslations"], ensure_ascii=False),
-        description_translations=json.dumps(food["descriptionTranslations"], ensure_ascii=False),
-        lang_count=len(TARGET_LANGS),
-        langs=", ".join(TARGET_LANGS),
     )
 
 
@@ -200,19 +174,6 @@ def avoidance_prompt(food: dict) -> str:
         spiciness=food["spiciness"],
         candidate_codes=AVOIDANCE_CODES,
     )
-
-
-def lang_scores(result: TranslationScores) -> dict[str, FieldScore]:
-    """모델 응답을 언어별 점수 맵으로 변환하고 누락된 언어는 0점으로 채운다.
-
-    make_scorers는 API 키 없이 생성할 수 없으므로 누락을 채우는 fail-closed 로직을
-    별도 함수로 분리해 단위 테스트할 수 있게 했다.
-    """
-    scores = {i.lang: FieldScore(score=i.score, reason=i.reason) for i in result.items}
-    # 모델이 누락한 언어는 0점으로 처리해 통과시키지 않는다(fail-closed).
-    for lang in TARGET_LANGS:
-        scores.setdefault(lang, FieldScore(score=0, reason="모델 응답에서 언어 누락"))
-    return scores
 
 
 def init_model(name: str, timeout: int):
@@ -238,20 +199,15 @@ def make_scorers(config):
     base = init_model(config.model, config.timeout_seconds)
     avoid = init_model(config.avoidance_model, config.timeout_seconds)
     desc_llm = base.with_structured_output(FieldScore)
-    trans_llm = base.with_structured_output(TranslationScores)
     avoid_llm = avoid.with_structured_output(FieldScore)
 
     async def description(food: dict) -> FieldScore:
         return await desc_llm.ainvoke(description_prompt(food))
 
-    async def translations(food: dict) -> dict[str, FieldScore]:
-        result: TranslationScores = await trans_llm.ainvoke(translations_prompt(food))
-        return lang_scores(result)
-
     async def avoidance(food: dict) -> FieldScore:
         return await avoid_llm.ainvoke(avoidance_prompt(food))
 
-    return Scorers(description=description, translations=translations, avoidance=avoidance)
+    return Scorers(description=description, avoidance=avoidance)
 
 
 # 사유 길이 상한. kbap도 Food.MAX_REJECTION_REASON_LINES(10) / _LENGTH(1000)로 자르지만,
@@ -266,7 +222,6 @@ MAX_REASON_CHARS = 200
 #   AVOIDANCE_SUBSTANCES와 spiciness는 한 번에 산출되므로 둘 다 비운다.
 REJECTED_FIELDS = {
     "description": ["DESCRIPTION"],
-    "translations": ["NAME_TRANSLATIONS", "DESCRIPTION_TRANSLATIONS"],
     "avoidance": ["AVOIDANCE_SUBSTANCES", "SPICINESS"],
 }
 
@@ -280,7 +235,6 @@ class Verdict(BaseModel):
 
 def decide(
     description_score: FieldScore,
-    translation_scores: dict[str, FieldScore],
     avoidance_score: FieldScore,
     thresholds: Thresholds,
 ) -> Verdict:
@@ -294,23 +248,11 @@ def decide(
     if description_score.score < thresholds.description:
         failed.append("description")
 
-    failed_langs = {
-        lang: s for lang, s in translation_scores.items() if s.score < thresholds.translations
-    }
-    # 응답에 없는 언어는 0점으로 취급한다. scoring.lang_scores가 이미 채우지만,
-    # decide()에 전달된 값만으로도 누락 언어를 통과시키지 않는 fail-closed 방어선이다.
-    for lang in TARGET_LANGS:
-        if lang not in translation_scores:
-            failed_langs[lang] = FieldScore(score=0, reason="번역 점수 누락")
-    if failed_langs:
-        failed.append("translations")
-
     if avoidance_score.score < thresholds.avoidance:
         failed.append("avoidance")
 
     scores = {
         "description": description_score.score,
-        "translations": {lang: s.score for lang, s in translation_scores.items()},
         "avoidance": avoidance_score.score,
     }
 
@@ -322,21 +264,16 @@ def decide(
         passed=False,
         rejected_fields=rejected_fields,
         scores=scores,
-        reason=_reason(failed, failed_langs, description_score, avoidance_score),
+        reason=_reason(failed, description_score, avoidance_score),
     )
 
 
 def _reason(
     failed: list[str],
-    failed_langs: dict[str, FieldScore],
     description_score: FieldScore,
     avoidance_score: FieldScore,
 ) -> str:
-    """재시도를 모두 소진했을 때 사람이 읽을 수 있는 개조식 사유를 만든다.
-
-    한 줄짜리 그룹(설명·기피성분)을 먼저 넣는다. kbap이 앞 10줄만 남기므로 언어별 사유가
-    많으면 뒤에 있는 기피성분 사유가 통째로 사라진다.
-    """
+    """재시도를 모두 소진했을 때 사람이 읽을 수 있는 개조식 사유를 만든다."""
     lines: list[str] = []
     if "description" in failed:
         lines.append(
@@ -347,8 +284,6 @@ def _reason(
             f"- 기피성분·매운맛({avoidance_score.score}점): "
             f"{avoidance_score.reason[:MAX_REASON_CHARS]}"
         )
-    for lang, s in failed_langs.items():
-        lines.append(f"- 번역 {lang}({s.score}점): {s.reason[:MAX_REASON_CHARS]}")
     return "\n".join(lines)[:MAX_NOTE_CHARS]
 
 
@@ -361,14 +296,12 @@ def _retryable(exc: Exception) -> bool:
 
 class Scorers(NamedTuple):
     description: Callable[[dict], Awaitable[FieldScore]]
-    translations: Callable[[dict], Awaitable[dict[str, FieldScore]]]
     avoidance: Callable[[dict], Awaitable[FieldScore]]
 
 
 class ReviewState(TypedDict, total=False):
     food: dict
     description_score: FieldScore
-    translation_scores: dict[str, FieldScore]
     avoidance_score: FieldScore
     verdict: Verdict
     applied: dict  # kbap 반영 후 상태. dry_run이면 없다.
@@ -379,20 +312,15 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
     async def score_description(state: ReviewState):
         return {"description_score": await scorers.description(state["food"])}
 
-    # 번역 검수 — 이름·설명 번역을 9개 언어별로 채점하고 누락된 언어는 0점 처리한다(팬아웃 분기 2)
-    async def score_translations(state: ReviewState):
-        return {"translation_scores": await scorers.translations(state["food"])}
-
     # 기피성분·매운맛 검수 — 주요 성분 누락을 최우선으로 채점한다(팬아웃 분기 3)
     async def score_avoidance(state: ReviewState):
         return {"avoidance_score": await scorers.avoidance(state["food"])}
 
-    # 종합 판정 — 세 점수를 임계값과 비교해 통과/탈락과 문제 필드를 결정한다(순수 함수, LLM 없음)
+    # 종합 판정 — 두 점수를 임계값과 비교해 통과/탈락과 문제 필드를 결정한다(순수 함수, LLM 없음)
     def aggregate(state: ReviewState):
         return {
             "verdict": decide(
                 description_score=state["description_score"],
-                translation_scores=state["translation_scores"],
                 avoidance_score=state["avoidance_score"],
                 thresholds=thresholds,
             )
@@ -412,16 +340,14 @@ def build_graph(scorers: Scorers, client, thresholds: Thresholds, dry_run: bool 
     retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ReviewState)
     g.add_node("score_description", score_description, retry_policy=retry)
-    g.add_node("score_translations", score_translations, retry_policy=retry)
     g.add_node("score_avoidance", score_avoidance, retry_policy=retry)
     g.add_node("aggregate", aggregate)
     g.add_node("report", report)
 
     g.add_edge(START, "score_description")
-    g.add_edge(START, "score_translations")
     g.add_edge(START, "score_avoidance")
-    # 리스트 엣지는 join으로, 세 채점이 모두 끝난 뒤 aggregate를 실행한다
-    g.add_edge(["score_description", "score_translations", "score_avoidance"], "aggregate")
+    # 리스트 엣지는 join으로, 두 채점이 모두 끝난 뒤 aggregate를 실행한다
+    g.add_edge(["score_description", "score_avoidance"], "aggregate")
     g.add_edge("aggregate", "report")
     g.add_edge("report", END)
     return g.compile()
