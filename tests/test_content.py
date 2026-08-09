@@ -12,6 +12,7 @@ from kbap.content import (
     DescGen,
     JudgeVerdict,
     LongDescGen,
+    NameReview,
     Translations,
     build_content_graph,
     build_ingest_payload,
@@ -20,19 +21,26 @@ from kbap.content import (
 )
 from kbap.review import TARGET_LANGS, FieldScore, Thresholds
 
-TH = Thresholds(description=70, translations=70, avoidance=70)
+TH = Thresholds(name=70, description=70, translations=70, avoidance=70)
 
 
 # ===== 그래프 배선·재시도 =====
 
 
-def build_fns(rec, name_translation_seq=(90,), description_seq=(90,), ingredient_seq=(90,)):
+def build_fns(rec, name_review_seq=(90,), name_translation_seq=(90,), description_seq=(90,), ingredient_seq=(90,)):
     """호출 기록(rec)과 검수 점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
-    name_translation_seq_scores, description_seq_scores, ingredient_scores = list(name_translation_seq), list(description_seq), list(ingredient_seq)
+    name_review_scores, name_translation_seq_scores, description_seq_scores, ingredient_scores = (
+        list(name_review_seq), list(name_translation_seq), list(description_seq), list(ingredient_seq)
+    )
 
-    async def clean_name(name):
-        rec["clean"].append(name)
+    async def clean_name(name, feedback):
+        rec["clean"].append((name, feedback))
         return {"name": "김치찌개", "reason": "오타 교정"}
+
+    async def review_name(original, cleaned):
+        rec["review_name"].append((original, cleaned))
+        score = name_review_scores.pop(0)
+        return NameReview(reason=f"이름 {score}", is_food=True, score=score)
 
     async def generate_name_translations(name, feedback):
         rec["gen_nt"].append((name, feedback))
@@ -74,6 +82,7 @@ def build_fns(rec, name_translation_seq=(90,), description_seq=(90,), ingredient
 
     return ContentFns(
         clean_name=clean_name,
+        review_name=review_name,
         generate_name_translations=generate_name_translations,
         generate_description=generate_description,
         generate_description_translations=generate_description_translations,
@@ -125,18 +134,23 @@ async def test_low_ingredient_score_fails_even_if_judge_passes():
     assert state["verdict"].failure_kind == "INGREDIENT_GUARD"
 
 
-async def test_non_food_ends_graph_without_generation():
-    # "사리 추가" 같은 옵션·판독 불가 입력은 정제 노드에서 그래프를 끝내 생성 8콜을 아낀다.
+async def test_non_food_ends_graph_without_generation_or_retry():
+    # "사리 추가" 같은 옵션·판독 불가 입력은 이름 검수에서 그래프를 끝내 생성 8콜을 아낀다.
+    # 비음식은 이름을 다시 고쳐도 음식이 안 되므로 재정제 3회 루프도 타지 않는다.
     rec = defaultdict(list)
-    fns = build_fns(rec)._replace(
-        clean_name=_rejected_clean_name(rec),
-    )
+
+    async def non_food_review(original, cleaned):
+        rec["review_name"].append((original, cleaned))
+        return NameReview(reason="옵션 항목", is_food=False, score=0)
+
+    fns = build_fns(rec)._replace(review_name=non_food_review)
     graph = build_content_graph(fns, TH)
     state = await graph.ainvoke({"food_name": "사리 추가"})
 
     assert state["verdict"].passed is False
     assert "부적합" in state["verdict"].reason
     assert state["verdict"].failure_kind == "NOT_FOOD"
+    assert len(rec["clean"]) == 1  # 재정제 없이 즉시 종료
     assert rec["gen_nt"] == []
     assert rec["generate_description"] == []
     assert rec["generate_ingredients"] == []
@@ -144,12 +158,29 @@ async def test_non_food_ends_graph_without_generation():
     assert rec["judge"] == []  # LLM 종합 판정도 건너뛴다
 
 
-def _rejected_clean_name(rec):
-    async def clean_name(name):
-        rec["clean"].append(name)
-        return {"name": name, "reason": "옵션 항목", "method": "rejected"}
+async def test_name_review_fail_retries_clean_with_feedback():
+    # 이름 검수 탈락 사유가 재정제 프롬프트로 전달돼야 한다.
+    rec = defaultdict(list)
+    state = await run(rec, name_review_seq=(30, 90))
 
-    return clean_name
+    assert [feedback for (_, feedback) in rec["clean"]] == ["", "이름 30"]
+    assert len(rec["review_name"]) == 2
+    assert state["verdict"].passed is True
+    # 검수를 통과한 뒤에만 후행 분기가 정확히 한 번 실행된다.
+    assert len(rec["gen_nt"]) == 1
+    assert len(rec["generate_long_description"]) == 1
+
+
+async def test_name_review_exhausted_rejects_as_not_food():
+    # 정제 3회(초회 포함) 후에도 검수 미달이면 NOT_FOOD 로 종료하고 생성은 시작하지 않는다.
+    rec = defaultdict(list)
+    state = await run(rec, name_review_seq=(30, 30, 30))
+
+    assert len(rec["clean"]) == 3
+    assert state["verdict"].passed is False
+    assert state["verdict"].failure_kind == "NOT_FOOD"
+    assert rec["gen_nt"] == []
+    assert rec["judge"] == []
 
 
 async def test_generators_receive_cleaned_name():

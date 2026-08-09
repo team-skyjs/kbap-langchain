@@ -1,7 +1,8 @@
 """이 프로젝트의 본체 — 음식 콘텐츠 생성·검수 전체 그래프와 SQS Lambda 핸들러.
 
-스캔된 이름 하나를 받아 이름 정제 → 3개 분기 생성(이름 번역 / 설명→설명 번역 /
-기피성분·매운맛) → 분기별 검수(실패 시 1회 재생성) → 종합 판정까지 끝낸다.
+스캔된 이름 하나를 받아 이름 정제 → 이름 검수(비음식 즉시 거절, 품질 미달은 최대 3회
+재정제) → 4개 분기 생성(이름 번역 / 설명→설명 번역 / 기피성분·매운맛 / 검색용 긴 설명)
+→ 분기별 검수(실패 시 1회 재생성) → 종합 판정까지 끝낸다.
 kbap(Spring) 콘텐츠 배치가 하던 생성·검수를 이 그래프가 전부 대체하는 것이 목표이며,
 이관이 끝나면 스프링에는 수집·저장·SQS 발행·관리자 승인 UI만 남는다.
 
@@ -32,6 +33,7 @@ from kbap.prompts import (
     DESC_TEMPLATE,
     DESC_TR_TEMPLATE,
     LONG_DESC_TEMPLATE,
+    NAME_REVIEW_TEMPLATE,
     JUDGE_TEMPLATE,
     NAME_TR_REVIEW_TEMPLATE,
     NAME_TR_TEMPLATE,
@@ -50,6 +52,14 @@ from kbap.review import (
 )
 
 
+# 이름 검수 결과. is_food 를 score 와 분리한 이유: 비음식("사리 추가")은 이름을 다시
+# 고쳐도 음식이 안 되므로 재정제 루프 없이 즉시 종료해 콜을 아낀다. score 미달만 재정제한다.
+class NameReview(BaseModel):
+    reason: str
+    is_food: bool
+    score: int = Field(ge=0, le=100)
+
+
 class JudgeVerdict(BaseModel):
     reason: str
     passed: bool
@@ -60,7 +70,8 @@ class JudgeVerdict(BaseModel):
 
 
 class ContentFns(NamedTuple):
-    clean_name: Callable[[str], Awaitable[dict]]
+    clean_name: Callable[[str, str], Awaitable[dict]]  # (원본, 검수 탈락 피드백)
+    review_name: Callable[[str, str], Awaitable[NameReview]]  # (스캔 원본, 정제된 이름)
     generate_name_translations: Callable[[str, str], Awaitable[dict]]
     generate_description: Callable[[str, str], Awaitable[str]]
     generate_description_translations: Callable[[str, str], Awaitable[dict]]
@@ -77,6 +88,9 @@ class ContentState(TypedDict, total=False):
     food_name: str  # 스캔 원본
     cleaned_name: str
     clean_reason: str
+    name_review: NameReview
+    name_attempts: int
+    name_feedback: str
     name_translations: dict[str, str]
     name_translation_score: FieldScore
     name_translation_attempts: int
@@ -94,26 +108,46 @@ class ContentState(TypedDict, total=False):
     verdict: JudgeVerdict
 
 
-def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2):
-    """max_attempts=2이면 최초 호출 1회와 재시도 1회 후 실패 점수·사유를 담아 판정한다."""
+def build_content_graph(
+    fns: ContentFns, thresholds: Thresholds, max_attempts: int = 2, name_max_attempts: int = 3
+):
+    """max_attempts=2이면 최초 호출 1회와 재시도 1회 후 실패 점수·사유를 담아 판정한다.
+    name_max_attempts 는 이름 정제의 총 실행 횟수 상한(초회 포함)이다."""
 
     # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다.
-    # 음식이 아니거나(옵션·안내 문구) 판독 불가면 여기서 FAIL verdict를 만들고 그래프를 끝내
-    # 생성·검수 8콜을 아낀다.
+    # 재실행 시 검수 탈락 사유(name_feedback)를 프롬프트에 넣어 개선을 유도한다.
     async def clean_name(state: ContentState):
-        fix = await fns.clean_name(state["food_name"])
-        out: ContentState = {"cleaned_name": fix["name"], "clean_reason": fix.get("reason", "")}
-        if fix.get("method") == "rejected":
-            reason = fix.get("reason", "") or "음식 메뉴명이 아님"
-            out["verdict"] = JudgeVerdict(
+        fix = await fns.clean_name(state["food_name"], state.get("name_feedback", ""))
+        return {
+            "cleaned_name": fix["name"],
+            "clean_reason": fix.get("reason", ""),
+            "name_attempts": state.get("name_attempts", 0) + 1,
+        }
+
+    # ①' 이름 검수 — 단일 음식 메뉴명인지(is_food)와 정제 품질(score)을 판정한다.
+    # 여기를 통과해야만 생성 분기가 시작된다.
+    async def review_name(state: ContentState):
+        r = await fns.review_name(state["food_name"], state["cleaned_name"])
+        return {"name_review": r, "name_feedback": r.reason}
+
+    # 비음식·재정제 소진 — NOT_FOOD verdict 를 만들고 그래프를 끝내 생성·검수 콜을 아낀다.
+    async def reject_name(state: ContentState):
+        reason = state.get("name_feedback", "") or "음식 메뉴명이 아님"
+        return {
+            "verdict": JudgeVerdict(
                 passed=False, reason=f"콘텐츠 생성 부적합: {reason}", failure_kind="NOT_FOOD"
             )
-        return out
+        }
 
-    # 부적합 판정이면 곧장 END, 아니면 4개 분기로 팬아웃한다
-    def route_after_clean(state: ContentState):
-        if "verdict" in state:
-            return END
+    # 비음식은 재정제해도 음식이 안 되므로 즉시 거절, 품질 미달만 재정제 루프를 탄다.
+    def route_after_review_name(state: ContentState):
+        r = state["name_review"]
+        if not r.is_food:
+            return "reject_name"
+        if r.score < thresholds.name:
+            if state["name_attempts"] < name_max_attempts:
+                return "clean_name"
+            return "reject_name"
         return [
             "generate_name_translations",
             "generate_description",
@@ -196,6 +230,8 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ContentState)
     g.add_node("clean_name", clean_name, retry_policy=retry)
+    g.add_node("review_name", review_name, retry_policy=retry)
+    g.add_node("reject_name", reject_name)  # LLM 없음 — 재시도 불필요
     g.add_node("generate_name_translations", generate_name_translations, retry_policy=retry)
     g.add_node("review_name_translations", review_name_translations, retry_policy=retry)
     g.add_node("generate_description", generate_description, retry_policy=retry)
@@ -208,17 +244,20 @@ def build_content_graph(fns: ContentFns, thresholds: Thresholds, max_attempts: i
     g.add_node("judge", judge, defer=True, retry_policy=retry)
 
     g.add_edge(START, "clean_name")
+    g.add_edge("clean_name", "review_name")
     g.add_conditional_edges(
-        "clean_name",
-        route_after_clean,
+        "review_name",
+        route_after_review_name,
         [
+            "clean_name",
+            "reject_name",
             "generate_name_translations",
             "generate_description",
             "generate_ingredients",
             "generate_long_description",
-            END,
         ],
     )
+    g.add_edge("reject_name", END)
     g.add_edge("generate_name_translations", "review_name_translations")
     g.add_edge("generate_description", "generate_description_translations")  # 설명을 재생성하면 번역도 함께 다시 만든다
     g.add_edge("generate_description_translations", "review_description")
@@ -371,6 +410,10 @@ def long_desc_prompt(name: str) -> str:
     return render_prompt("food-long-description", LONG_DESC_TEMPLATE, name=name)
 
 
+def name_review_prompt(original: str, name: str) -> str:
+    return render_prompt("food-name-review", NAME_REVIEW_TEMPLATE, original=original, name=name)
+
+
 def desc_tr_prompt(name: str, description: str) -> str:
     return render_prompt(
         "food-description-translation",
@@ -461,12 +504,17 @@ def make_fns(
     long_desc_llm = _bind(gen_base.with_structured_output(LongDescGen))
     ingredients_llm = _bind(base.with_structured_output(IngredientsGen))
     score_llm = _bind(base.with_structured_output(FieldScore))
+    # 이름 검수 — 비음식 거름이 콘텐츠 파이프라인의 입구 게이트라 기본 모델을 쓴다.
+    name_review_llm = _bind(base.with_structured_output(NameReview))
     tr_score_llm = _bind(base.with_structured_output(TranslationScores))
     normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
-    async def clean_name(name: str) -> dict:
+    async def clean_name(name: str, feedback: str) -> dict:
         # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정된 음식명을 앵커로 주입
-        return await clean_one(name, [], normalize)
+        return await clean_one(name, [], normalize, feedback)
+
+    async def review_name(original: str, cleaned: str) -> NameReview:
+        return await name_review_llm.ainvoke(name_review_prompt(original, cleaned))
 
     async def generate_name_translations(name: str, feedback: str) -> dict:
         result: Translations = await tr_llm.ainvoke(name_tr_prompt(name, feedback))
@@ -524,6 +572,7 @@ def make_fns(
 
     return ContentFns(
         clean_name=clean_name,
+        review_name=review_name,
         generate_name_translations=generate_name_translations,
         generate_description=generate_description,
         generate_description_translations=generate_description_translations,

@@ -42,9 +42,9 @@ def test_snap_ambiguous_tie_rejected():
 
 
 def make_normalizer(corrected: str, calls: list | None = None):
-    async def normalize(name: str) -> NameFix:
+    async def normalize(name: str, feedback: str = "") -> NameFix:
         if calls is not None:
-            calls.append(name)
+            calls.append((name, feedback))
         return NameFix(reason="테스트", corrected=corrected)
 
     return normalize
@@ -57,14 +57,11 @@ async def test_clean_one_snap_skips_llm():
     assert calls == []  # 스냅에 성공하면 LLM을 호출하지 않는다
 
 
-async def test_clean_one_rejects_non_food():
-    async def normalize(name: str) -> NameFix:
-        return NameFix(reason="사리 추가는 옵션 항목", is_food=False, corrected=name)
-
-    result = await clean_one("사리 추가", [], normalize)
-    assert result["method"] == "rejected"
-    assert result["name"] == "사리 추가"  # 원본 유지 — 폐기 여부는 호출부가 결정한다
-    assert result["reason"] == "사리 추가는 옵션 항목"
+async def test_clean_one_passes_feedback_to_normalizer():
+    # 이름 검수 탈락 사유가 재정제 프롬프트에 들어가야 한다 — 비음식 판정은 검수 노드로 이관됐다.
+    calls: list = []
+    await clean_one("김치찌게", [], make_normalizer("김치찌개", calls), feedback="오타가 남아 있다")
+    assert calls == [("김치찌게", "오타가 남아 있다")]
 
 
 async def test_clean_one_llm_correction():
@@ -97,7 +94,7 @@ async def test_clean_one_llm_empty_output_keeps_original():
 
 
 async def test_clean_batch_isolates_failures():
-    async def flaky(name: str) -> NameFix:
+    async def flaky(name: str, feedback: str = "") -> NameFix:
         if name == "폭탄":
             raise RuntimeError("LLM down")
         return NameFix(reason="ok", corrected=name)
