@@ -91,7 +91,7 @@ class ContentFns(NamedTuple):
     generate_ingredients: Callable[[str, str], Awaitable[dict]]
     # 벡터 검색 메타데이터용 — 검수 루프가 없어 피드백 파라미터도 없다.
     generate_long_description: Callable[[str], Awaitable[str]]
-    review_description: Callable[[str, str, dict], Awaitable[DescReview]]
+    review_description: Callable[[str, str], Awaitable[DescReview]]  # 한국어 설명만 검수
     review_ingredients: Callable[[str, dict], Awaitable[IngredientsReview]]
     judge: Callable[[dict], Awaitable[JudgeVerdict]]
 
@@ -172,17 +172,16 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         desc = await fns.generate_description(state["cleaned_name"], state.get("description_feedback", ""))
         return {"description": desc, "description_attempts": state.get("description_attempts", 0) + 1}
 
-    # 설명 번역 생성(분기 2 후속) — 설명을 재생성할 때마다 번역도 다시 생성한다
+    # 설명 검수 — 한국어 설명만 본다. 번역 생성보다 먼저 실행해, 탈락한 설명의 번역을
+    # 만들지 않는다(설명이 확정된 뒤 번역은 정확히 1회).
+    async def review_description(state: ContentState):
+        score = await fns.review_description(state["cleaned_name"], state["description"])
+        return {"description_score": score, "description_feedback": score.reason}
+
+    # 설명 번역 생성(분기 2 후속) — 검수를 통과해 확정된 설명으로 1회만 생성한다
     async def generate_description_translations(state: ContentState):
         tr = await fns.generate_description_translations(state["cleaned_name"], state["description"])
         return {"description_translations": tr}
-
-    # 설명·설명 번역 검수 — 내용의 사실성과 번역 품질을 하나의 점수로 판정한다
-    async def review_description(state: ContentState):
-        score = await fns.review_description(
-            state["cleaned_name"], state["description"], state["description_translations"]
-        )
-        return {"description_score": score, "description_feedback": score.reason}
 
     # ④ 기피성분·매운맛 생성(분기 3) — 81종 후보에서 선택하고 후보 밖 코드는 저장 전에 거른다
     async def generate_ingredients(state: ContentState):
@@ -219,11 +218,12 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         return {"verdict": verdict}
 
     # 설명은 3점 만점(DESC_PASS_SCORE)만 통과, 기피성분은 통과/불통과 — 미달이면 1회 재생성.
+    # 재시도 소진 시에도 번역은 만들어 judge 로 보낸다 — judge 가 통과시키면 payload 에 필요하다.
     def route_after_review_description(state: ContentState) -> str:
         failed = state["description_score"].score < DESC_PASS_SCORE
         if failed and state["description_attempts"] < max_attempts:
             return "generate_description"
-        return "judge"
+        return "generate_description_translations"
 
     def route_after_review_ingredients(state: ContentState) -> str:
         if not state["ingredient_review"].passed and state["ingredient_attempts"] < max_attempts:
@@ -262,14 +262,14 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     )
     g.add_edge("reject_name", END)
     g.add_edge("generate_name_translations", "judge")  # 검수 없이 join만
-    g.add_edge("generate_description", "generate_description_translations")  # 설명을 재생성하면 번역도 함께 다시 만든다
-    g.add_edge("generate_description_translations", "review_description")
+    g.add_edge("generate_description", "review_description")  # 검수 먼저 — 탈락한 설명의 번역을 만들지 않는다
+    g.add_edge("generate_description_translations", "judge")
     g.add_edge("generate_ingredients", "review_ingredients")
     g.add_edge("generate_long_description", "judge")  # 검수 없이 join만 — judge는 defer라 4분기를 기다린다
     g.add_conditional_edges(
         "review_description",
         route_after_review_description,
-        ["generate_description", "judge"],
+        ["generate_description", "generate_description_translations"],
     )
     g.add_conditional_edges(
         "review_ingredients",
@@ -432,13 +432,9 @@ def ingredients_gen_prompt(name: str, feedback: str) -> str:
     )
 
 
-def desc_review_prompt(name: str, description: str, translations: dict) -> str:
+def desc_review_prompt(name: str, description: str) -> str:
     return render_prompt(
-        "food-description-review",
-        DESC_REVIEW_TEMPLATE,
-        name=name,
-        description=description,
-        translations=json.dumps(translations, ensure_ascii=False),
+        "food-description-review", DESC_REVIEW_TEMPLATE, name=name, description=description
     )
 
 
@@ -459,7 +455,7 @@ def judge_prompt(state: dict) -> str:
     ingredient = state["ingredient_review"]
     lines = "\n".join(
         [
-            f"- 설명·설명 번역: {desc.score}/3점 — {desc.reason}",
+            f"- 설명: {desc.score}/3점 — {desc.reason}",
             f"- 기피성분·매운맛: {'통과' if ingredient.passed else '불통과'} — {ingredient.reason}",
         ]
     )
@@ -537,8 +533,8 @@ def make_fns(
             "spiciness": result.spiciness,
         }
 
-    async def review_description(name: str, description: str, translations: dict) -> DescReview:
-        return await desc_review_llm.ainvoke(desc_review_prompt(name, description, translations))
+    async def review_description(name: str, description: str) -> DescReview:
+        return await desc_review_llm.ainvoke(desc_review_prompt(name, description))
 
     async def review_ingredients(name: str, ingredients: dict) -> IngredientsReview:
         return await ingredients_review_llm.ainvoke(ingredients_review_prompt(name, ingredients))

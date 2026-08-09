@@ -63,7 +63,7 @@ def build_fns(rec, name_review_seq=(True,), description_seq=(3,), ingredient_seq
         rec["generate_long_description"].append(name)
         return "돼지고기와 신김치를 넣고 끓인 한국의 대표 찌개 요리. 얼큰하고 시원한 국물이 특징이다."
 
-    async def review_description(name, desc, desc_tr):
+    async def review_description(name, desc):
         score = description_seq_scores.pop(0)
         return DescReview(reason=f"설명 {score}", score=score)
 
@@ -199,8 +199,8 @@ async def test_review_fail_retries_generation_once_with_feedback():
     assert len(rec["generate_description"]) == 2
     # 재시도 프롬프트에 탈락 사유를 포함해야 한다.
     assert rec["generate_description"][1][1] == "설명 2"
-    # 설명을 재생성하면 설명 번역도 다시 만든다(순차 분기).
-    assert len(rec["generate_description_translations"]) == 2
+    # 검수는 한국어 설명만 보므로, 번역은 설명이 확정된 뒤 정확히 한 번만 만든다.
+    assert len(rec["generate_description_translations"]) == 1
     assert state["description_attempts"] == 2
     assert state["verdict"].passed is True
     assert len(rec["judge"]) == 1
@@ -212,6 +212,8 @@ async def test_retry_exhausted_flows_failure_to_judge():
 
     # 한 번만 재시도해 총 생성 횟수가 2회를 넘지 않는다.
     assert len(rec["generate_description"]) == 2
+    # 재시도 소진 후에도 번역은 1회 생성해 judge 로 간다 (judge 가 통과시키면 payload 에 필요).
+    assert len(rec["generate_description_translations"]) == 1
     assert len(rec["judge"]) == 1
     # 종합 판정에는 실패 점수와 사유를 그대로 전달한다.
     judged = rec["judge"][0]
