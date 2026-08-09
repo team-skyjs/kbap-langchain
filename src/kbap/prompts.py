@@ -350,8 +350,8 @@ PROMPTS = {
     "food-description-review": DESC_REVIEW_TEMPLATE,
     "food-ingredients-review": INGREDIENTS_REVIEW_TEMPLATE,
     "food-judge": JUDGE_TEMPLATE,
-    "food-review-description": REVIEW_DESCRIPTION_TEMPLATE,
-    "food-review-ingredients": REVIEW_AVOIDANCE_TEMPLATE,
+    # 과도기 검수 배치용 food-review-* 는 Langfuse 에서 제거됨 — 배치는 코드 폴백
+    # 템플릿(REVIEW_*_TEMPLATE)으로 동작하며, 배치 은퇴 시 템플릿도 함께 삭제한다.
 }
 
 
