@@ -582,12 +582,19 @@ async def process_event(
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
                 return message_id
         verdict = result["verdict"]
-        try:
-            await kbap.post_food_content(build_ingest_payload(result))
-        except Exception:
-            # 서버가 멱등이라 재시도 안전. 3회 소진(409 소프트 삭제 충돌 등)이면 DLQ로.
-            log.exception("적재 실패 foodId=%s (%s)", food_id, name)
-            return message_id
+        # 프롬프트 튜닝 기간이라 적재 POST 를 잠시 끈다 — 응답 필드가 아직 바뀔 수 있다.
+        # 보냈을 본문은 로그로 남겨 CloudWatch 에서 필드 변화를 검토한다.
+        # 튜닝이 끝나면 아래 블록 주석을 해제하고 이 로그 한 줄과 관련 테스트 skip 을 되돌린다.
+        log.info(
+            "적재 페이로드(전송 안 함): %s",
+            json.dumps(build_ingest_payload(result), ensure_ascii=False),
+        )
+        # try:
+        #     await kbap.post_food_content(build_ingest_payload(result))
+        # except Exception:
+        #     # 서버가 멱등이라 재시도 안전. 3회 소진(409 소프트 삭제 충돌 등)이면 DLQ로.
+        #     log.exception("적재 실패 foodId=%s (%s)", food_id, name)
+        #     return message_id
         log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
         return None
 

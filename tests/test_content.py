@@ -359,6 +359,11 @@ def record(message_id: str, food_id: int, name: str) -> dict:
     return {"messageId": message_id, "body": json.dumps({"foodId": food_id, "scannedName": name})}
 
 
+# 적재 POST 임시 비활성(프롬프트 튜닝 기간 — content.py process_event 주석 참조).
+# POST 를 되살릴 때 이 마커를 지우고 아래 skip 두 개와 주석 처리된 단언을 복원한다.
+_POST_DISABLED = pytest.mark.skip(reason="적재 POST 임시 비활성 — 프롬프트 튜닝 기간")
+
+
 async def test_all_success_posts_each_food_and_reports_no_failures():
     graph, kbap = FakeGraph(), FakeKbap()
     event = {"Records": [record("m1", 1, "김치찌개"), record("m2", 2, "불고기")]}
@@ -367,10 +372,13 @@ async def test_all_success_posts_each_food_and_reports_no_failures():
 
     assert failures == []
     assert sorted(graph.calls) == ["김치찌개", "불고기"]
-    assert sorted(p["displayName"] for p in kbap.posts) == ["김치찌개", "불고기"]
-    assert all(p["passed"] for p in kbap.posts)
+    # POST 임시 비활성 동안은 아무것도 전송하지 않는다.
+    assert kbap.posts == []
+    # assert sorted(p["displayName"] for p in kbap.posts) == ["김치찌개", "불고기"]
+    # assert all(p["passed"] for p in kbap.posts)
 
 
+@_POST_DISABLED
 async def test_failed_verdict_is_posted_with_failure_kind():
     # 판정 실패도 kbap에 적재한다(FAILED 상태 저장) — 메시지 재시도 대상이 아니다.
     verdict = JudgeVerdict(reason="번역 미달", passed=False, failure_kind="JUDGE_REJECTED")
@@ -385,6 +393,7 @@ async def test_failed_verdict_is_posted_with_failure_kind():
     ]
 
 
+@_POST_DISABLED
 async def test_post_failure_reports_message_for_retry():
     # 네트워크·5xx·409 전부 — POST 실패면 재시도(→3회 후 DLQ)로 보낸다.
     graph, kbap = FakeGraph(), FakeKbap(fail=True)
@@ -405,7 +414,9 @@ async def test_partial_failure_reports_only_failed_message():
 
     assert failures == ["m2"]
     # 그래프 런타임 예외는 POST하지 않는다 — FAILED에 인프라 장애를 섞지 않는다.
-    assert [p["displayName"] for p in kbap.posts] == ["김치찌개"]
+    # (POST 임시 비활성 동안은 성공 건도 전송하지 않는다)
+    assert kbap.posts == []
+    # assert [p["displayName"] for p in kbap.posts] == ["김치찌개"]
 
 
 async def test_name_only_message_is_processed():
