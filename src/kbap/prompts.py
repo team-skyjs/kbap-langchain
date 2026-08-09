@@ -221,37 +221,51 @@ present(들어갈 가능성 있는)만 나열한다. 사실상 0%인 성분은 �
 
 # ===== 콘텐츠 그래프 검수 =====
 
-NAME_TR_REVIEW_TEMPLATE = """당신은 다국어 번역 검수자입니다. 한국 음식 이름의 번역을 언어별로
-0~100점으로 채점하세요. 오역을 잡는 것이 목적입니다:
-- 번역이 이 음식을 제대로 가리키는가 (다른 요리 이름이 되지 않았는가)
-- lang 이 가리키는 언어로 실제로 쓰여 있는가 (아니면 0점)
+DESC_REVIEW_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 설명과 설명 번역을 1~3점 하나로
+판정하세요. 기준은 명확합니다:
 
-음식 이름(한국어): {{name}}
-이름 번역: {{translations}}
+- 3: 설명이 이 음식을 사실대로 정확히 설명하고 자연스러우며, 번역도 원문과 같은 내용을
+  각 언어로 바르게 옮겼다 — 통과
+- 2: 사실은 맞지만 결함이 있다 — 표현이 어색하거나, 부차 정보가 부정확하거나, 일부 번역이 어색하다
+- 1: 사실 오류 — 없는 재료·다른 음식의 조리법이 섞였거나, 번역이 다른 음식을 가리킨다
 
-items 배열은 정확히 {{lang_count}}개({{langs}}), 각각 lang·reason·score.
-reason 은 {{pass_score}}점 미만인 언어만 한국어 한 문장으로 쓰고, 그 외에는 빈 문자열로 두세요."""
-
-DESC_REVIEW_TEMPLATE = """당신은 한국 음식 콘텐츠 검수자입니다. 설명과 설명 번역을 함께 0~100점
-하나로 채점하세요:
-- 설명이 이 음식을 사실대로 정확히 설명하는가 (없는 재료·다른 음식 조리법 금지)
-- 번역들이 원문과 같은 내용인가, 각 lang 의 언어로 자연스럽게 쓰였는가
-- 하나라도 심각한 문제가 있으면 그 항목 기준으로 낮게 매기세요
+3점만 통과입니다. 2점 이하면 reason 에 무엇을 고쳐야 3점이 되는지 구체적으로 쓰세요 —
+재생성 프롬프트에 그대로 전달됩니다.
 
 음식 이름: {{name}}
 설명(한국어): {{description}}
 설명 번역: {{translations}}
 
-score(0~100)와 reason(한국어 한 문장, 문제 항목 명시)을 반환하세요."""
+reason(한국어 한 문장), score(1~3)를 반환하세요."""
 
-JUDGE_TEMPLATE = """당신은 한국 음식 콘텐츠의 최종 판정자입니다. 필드별 검수 점수와 사유를 보고
+INGREDIENTS_REVIEW_TEMPLATE = """당신은 한국 음식의 기피성분 데이터 검수자입니다. 생성된 기피성분·매운맛을
+그대로 저장해도 되는지 통과/불통과로 판정하세요. 점수가 아니라 명확한 판단입니다.
+
+다음이 하나라도 보이면 passed=false:
+- 이 음식에 실제로 들어가지 않는, 관련 없는 재료가 목록에 있다
+- 아래 후보 목록에 없는 재료가 있다 (우리가 다루지 않는 재료)
+- 이 음식에 일반적으로 들어가는 주요 기피 성분이 빠져 있다 — 안전 직결이므로 누락이 가장 심각하다
+- spiciness(0~10)가 이 음식의 일반적인 매운맛과 명백히 다르다
+
+후보 목록:
+{{candidate_codes}}
+
+음식 이름: {{name}}
+기피성분: {{ingredients}}
+spiciness: {{spiciness}}
+
+reason 은 한국어 한 문장 — 불통과면 무엇을 고쳐야 하는지 구체적으로 쓰세요.
+재생성 프롬프트에 그대로 전달됩니다.
+
+reason, passed 를 반환하세요."""
+
+JUDGE_TEMPLATE = """당신은 한국 음식 콘텐츠의 최종 판정자입니다. 필드별 검수 결과와 사유를 보고
 이 음식 콘텐츠를 통과(passed=true)시킬지 판정하세요.
 
 원칙:
-- 임계값 미달 필드가 있으면 원칙적으로 탈락이며, rejected_fields 에 해당 필드를 담으세요.
-  필드 이름은 다음 중에서만: translations, description, avoidance
-- 점수가 임계값을 넘어도 사유에 안전 문제(기피성분 누락 등)가 보이면 탈락시키세요.
-- 애매한 감점(문체·사소한 표현)만으로 임계값 근처에서 탈락시키지는 마세요.
+- 기준 미달 필드(설명 3점 미만, 기피성분 불통과)가 있으면 원칙적으로 탈락이며,
+  rejected_fields 에 해당 필드를 담으세요. 필드 이름은 다음 중에서만: description, avoidance
+- 기준을 넘겼어도 사유에 안전 문제(기피성분 누락 등)가 보이면 탈락시키세요.
 
 음식 이름: {{name}}
 검수 결과:
@@ -358,8 +372,8 @@ PROMPTS = {
     "food-long-description": LONG_DESC_TEMPLATE,
     "food-description-translation": DESC_TR_TEMPLATE,
     "food-ingredients": INGREDIENTS_GEN_TEMPLATE,
-    "food-name-translation-review": NAME_TR_REVIEW_TEMPLATE,
     "food-description-review": DESC_REVIEW_TEMPLATE,
+    "food-ingredients-review": INGREDIENTS_REVIEW_TEMPLATE,
     "food-judge": JUDGE_TEMPLATE,
     "food-review-description": REVIEW_DESCRIPTION_TEMPLATE,
     "food-review-translations": REVIEW_TRANSLATIONS_TEMPLATE,

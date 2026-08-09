@@ -9,7 +9,10 @@ from pydantic import ValidationError
 from kbap.content import (
     VALID_CODES,
     ContentFns,
+    DESC_PASS_SCORE,
     DescGen,
+    DescReview,
+    IngredientsReview,
     JudgeVerdict,
     LongDescGen,
     NameReview,
@@ -19,18 +22,16 @@ from kbap.content import (
     process_event,
     valid_substances,
 )
-from kbap.review import TARGET_LANGS, FieldScore, Thresholds
-
-TH = Thresholds(description=70, translations=70, avoidance=70)
+from kbap.review import TARGET_LANGS
 
 
 # ===== 그래프 배선·재시도 =====
 
 
-def build_fns(rec, name_review_seq=(True,), name_translation_seq=(90,), description_seq=(90,), ingredient_seq=(90,)):
+def build_fns(rec, name_review_seq=(True,), description_seq=(3,), ingredient_seq=(True,)):
     """호출 기록(rec)과 검수 통과/점수 시퀀스로 테스트용 노드 함수 모음을 만든다."""
-    name_review_results, name_translation_seq_scores, description_seq_scores, ingredient_scores = (
-        list(name_review_seq), list(name_translation_seq), list(description_seq), list(ingredient_seq)
+    name_review_results, description_seq_scores, ingredient_results = (
+        list(name_review_seq), list(description_seq), list(ingredient_seq)
     )
 
     async def clean_name(name, feedback):
@@ -42,8 +43,8 @@ def build_fns(rec, name_review_seq=(True,), name_translation_seq=(90,), descript
         passed = name_review_results.pop(0)
         return NameReview(reason=f"이름검수{len(rec['review_name'])}", is_food=True, passed=passed)
 
-    async def generate_name_translations(name, feedback):
-        rec["gen_nt"].append((name, feedback))
+    async def generate_name_translations(name):
+        rec["gen_nt"].append(name)
         return {"en": "Kimchi Stew"}
 
     async def generate_description(name, feedback):
@@ -62,22 +63,20 @@ def build_fns(rec, name_review_seq=(True,), name_translation_seq=(90,), descript
         rec["generate_long_description"].append(name)
         return "돼지고기와 신김치를 넣고 끓인 한국의 대표 찌개 요리. 얼큰하고 시원한 국물이 특징이다."
 
-    async def review_name_translations(name, translations):
-        score = name_translation_seq_scores.pop(0)
-        return FieldScore(score=score, reason=f"이름번역 {score}")
-
     async def review_description(name, desc, desc_tr):
         score = description_seq_scores.pop(0)
-        return FieldScore(score=score, reason=f"설명 {score}")
+        return DescReview(reason=f"설명 {score}", score=score)
 
     async def review_ingredients(name, ingredients):
-        score = ingredient_scores.pop(0)
-        return FieldScore(score=score, reason=f"기피 {score}")
+        passed = ingredient_results.pop(0)
+        return IngredientsReview(reason=f"기피 {'통과' if passed else '불통과'}", passed=passed)
 
     async def judge(state):
         rec["judge"].append(state)
-        scores = [state["name_translation_score"], state["description_score"], state["ingredient_score"]]
-        passed = all(s.score >= 70 for s in scores)
+        passed = (
+            state["description_score"].score >= DESC_PASS_SCORE
+            and state["ingredient_review"].passed
+        )
         return JudgeVerdict(reason="종합", passed=passed, rejected_fields=[])
 
     return ContentFns(
@@ -88,7 +87,6 @@ def build_fns(rec, name_review_seq=(True,), name_translation_seq=(90,), descript
         generate_description_translations=generate_description_translations,
         generate_ingredients=generate_ingredients,
         generate_long_description=generate_long_description,
-        review_name_translations=review_name_translations,
         review_description=review_description,
         review_ingredients=review_ingredients,
         judge=judge,
@@ -96,7 +94,7 @@ def build_fns(rec, name_review_seq=(True,), name_translation_seq=(90,), descript
 
 
 async def run(rec, **seqs):
-    graph = build_content_graph(build_fns(rec, **seqs), TH)
+    graph = build_content_graph(build_fns(rec, **seqs))
     return await graph.ainvoke({"food_name": "김치찌게 8,000원"})
 
 
@@ -115,22 +113,23 @@ async def test_happy_path_populates_all_content():
     assert len(rec["generate_description"]) == 1
     assert len(rec["generate_long_description"]) == 1
     assert len(rec["judge"]) == 1
+    # 이름 번역은 검수 없이 1회 생성 — 9키 전수는 pydantic(Translations)이 보장한다
+    assert rec["gen_nt"] == ["김치찌개"]
 
 
-async def test_low_ingredient_score_fails_even_if_judge_passes():
-    # 안전 fail-closed: LLM judge가 통과를 줘도 기피성분 임계값 미달이면 코드가 탈락시킨다.
+async def test_failed_ingredient_review_fails_even_if_judge_passes():
+    # 안전 fail-closed: LLM judge가 통과를 줘도 기피성분 검수 불통과면 코드가 탈락시킨다.
     rec = defaultdict(list)
 
     async def lenient_judge(state):
         return JudgeVerdict(reason="관대한 판정", passed=True, rejected_fields=[])
 
-    fns = build_fns(rec, ingredient_seq=(30, 30))._replace(judge=lenient_judge)
-    graph = build_content_graph(fns, TH)
+    fns = build_fns(rec, ingredient_seq=(False, False))._replace(judge=lenient_judge)
+    graph = build_content_graph(fns)
     state = await graph.ainvoke({"food_name": "김치찌개"})
 
     assert state["verdict"].passed is False
     assert state["verdict"].rejected_fields == ["avoidance"]
-    assert "임계값" in state["verdict"].reason
     assert state["verdict"].failure_kind == "INGREDIENT_GUARD"
 
 
@@ -144,7 +143,7 @@ async def test_non_food_ends_graph_without_generation_or_retry():
         return NameReview(reason="옵션 항목", is_food=False, passed=False)
 
     fns = build_fns(rec)._replace(review_name=non_food_review)
-    graph = build_content_graph(fns, TH)
+    graph = build_content_graph(fns)
     state = await graph.ainvoke({"food_name": "사리 추가"})
 
     assert state["verdict"].passed is False
@@ -187,7 +186,7 @@ async def test_generators_receive_cleaned_name():
     rec = defaultdict(list)
     await run(rec)
     # 생성 단계에는 원본("김치찌게 8,000원")이 아닌 정제된 이름을 전달해야 한다.
-    assert rec["gen_nt"][0][0] == "김치찌개"
+    assert rec["gen_nt"][0] == "김치찌개"
     assert rec["generate_description"][0][0] == "김치찌개"
     assert rec["generate_ingredients"][0][0] == "김치찌개"
     assert rec["generate_long_description"][0] == "김치찌개"
@@ -195,11 +194,11 @@ async def test_generators_receive_cleaned_name():
 
 async def test_review_fail_retries_generation_once_with_feedback():
     rec = defaultdict(list)
-    state = await run(rec, description_seq=(30, 90))
+    state = await run(rec, description_seq=(2, 3))
 
     assert len(rec["generate_description"]) == 2
     # 재시도 프롬프트에 탈락 사유를 포함해야 한다.
-    assert rec["generate_description"][1][1] == "설명 30"
+    assert rec["generate_description"][1][1] == "설명 2"
     # 설명을 재생성하면 설명 번역도 다시 만든다(순차 분기).
     assert len(rec["generate_description_translations"]) == 2
     assert state["description_attempts"] == 2
@@ -209,15 +208,15 @@ async def test_review_fail_retries_generation_once_with_feedback():
 
 async def test_retry_exhausted_flows_failure_to_judge():
     rec = defaultdict(list)
-    state = await run(rec, description_seq=(30, 40))
+    state = await run(rec, description_seq=(2, 2))
 
     # 한 번만 재시도해 총 생성 횟수가 2회를 넘지 않는다.
     assert len(rec["generate_description"]) == 2
     assert len(rec["judge"]) == 1
     # 종합 판정에는 실패 점수와 사유를 그대로 전달한다.
     judged = rec["judge"][0]
-    assert judged["description_score"].score == 40
-    assert judged["description_feedback"] == "설명 40"
+    assert judged["description_score"].score == 2
+    assert judged["description_feedback"] == "설명 2"
     assert state["verdict"].passed is False
     # LLM judge 가 failure_kind 를 안 채워도(테스트 fns 처럼) 노드 코드가 확정적으로 찍는다.
     assert state["verdict"].failure_kind == "JUDGE_REJECTED"
@@ -225,7 +224,7 @@ async def test_retry_exhausted_flows_failure_to_judge():
 
 async def test_independent_branches_do_not_retry_each_other():
     rec = defaultdict(list)
-    await run(rec, ingredient_seq=(30, 90))
+    await run(rec, ingredient_seq=(False, True))
 
     assert len(rec["generate_ingredients"]) == 2
     assert len(rec["generate_description"]) == 1
