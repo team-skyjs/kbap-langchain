@@ -251,7 +251,8 @@ def test_ingest_payload_passed_maps_contract_fields():
         "verdict": JudgeVerdict(reason="ok", passed=True),
     }
 
-    assert build_ingest_payload(state) == {
+    assert build_ingest_payload(state, food_id=1234) == {
+        "foodId": 1234,  # 큐 메시지 값 왕복 — 서버는 foodId 로만 대상을 찾는다
         "displayName": "김치찌개",  # 스캔 원본이 아닌 정제된 이름
         "passed": True,
         "description": "돼지고기와 김치를 끓인 찌개",
@@ -272,7 +273,8 @@ def test_ingest_payload_failed_sends_kind_and_reason_only():
         ),
     }
 
-    assert build_ingest_payload(state) == {
+    assert build_ingest_payload(state, food_id=99) == {
+        "foodId": 99,
         "displayName": "사리 추가",
         "passed": False,
         "failureKind": "NOT_FOOD",
@@ -452,7 +454,7 @@ async def test_failed_verdict_is_posted_with_failure_kind():
 
     assert failures == []
     assert kbap.posts == [
-        {"displayName": "김치찌개", "passed": False, "failureKind": "JUDGE_REJECTED", "reason": "번역 미달"}
+        {"foodId": 1, "displayName": "김치찌개", "passed": False, "failureKind": "JUDGE_REJECTED", "reason": "번역 미달"}
     ]
 
 
@@ -482,15 +484,16 @@ async def test_partial_failure_reports_only_failed_message():
     # assert [p["displayName"] for p in kbap.posts] == ["김치찌개"]
 
 
-async def test_name_only_message_is_processed():
-    # DB 저장 전에는 foodId 없이 이름만 발행된다 — 계약 위반이 아니다.
+async def test_name_only_message_is_contract_violation():
+    # 서버가 foodId 로만 대상을 찾으므로(2026-08-11 개정) foodId 없는 메시지는
+    # 적재 불가 — 그래프를 태우지 않고 실패로 보고해 DLQ로 보낸다.
     graph = FakeGraph()
     event = {"Records": [{"messageId": "m1", "body": json.dumps({"scannedName": "김치찌개"})}]}
 
     failures = await process_event(event, graph, FakeKbap(), concurrency=20)
 
-    assert failures == []
-    assert graph.calls == ["김치찌개"]
+    assert failures == ["m1"]
+    assert graph.calls == []
 
 
 async def test_malformed_body_is_reported_as_failure():
