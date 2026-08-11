@@ -72,7 +72,8 @@ Langfuse 키가 `.env`에 있으면 음식 1건 = 트레이스 1개로 자동 �
 `./deploy.sh` — arm64 컨테이너 이미지를 빌드해 ECR `kbap/langchain`에 푸시하고
 Lambda `kbap-generate-content` 코드를 갱신한다(프로필 `kbap-lambda-deployer`).
 SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 RPM을 제어한다.
-메시지 계약: `{"scannedName": <str>, "foodId": <int, 선택>}` — foodId 가 없으면 이름이 식별자.
+메시지 계약: `{"scannedName": <str>, "foodId": <int>, "outboxId": <int>}` — foodId·outboxId 는
+필수(양수)이며 적재 API 본문에 그대로 왕복된다. 위반 메시지는 그래프 실행 없이 DLQ 행.
 
 ## 프롬프트 관리
 
@@ -85,8 +86,5 @@ SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 R
 
 ## 남은 이관 작업
 
-- 프롬프트 튜닝 종료 후 적재 POST 활성화 — 지금은 페이로드를 로그로만 남긴다
-  (`content.py` 의 process_event, 계약은 agenthub `wiki/langchain-food-ingest-contract.md`)
-- 적재 계약에 `longDescription` 필드 추가 합의
 - 과도기 배치(`review.py`) 은퇴 — 생성까지 전량 이관되면 삭제
 - 기피성분 정확도 필요 시: 다중 모델 합의(스프링 방식) 또는 web_search 도구

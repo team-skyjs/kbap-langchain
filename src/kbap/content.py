@@ -28,6 +28,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from kbap.review import DuplicateIngestError
+
 from kbap.prompts import (
     INGREDIENTS_GEN_TEMPLATE,
     INGREDIENTS_REVIEW_TEMPLATE,
@@ -635,11 +637,15 @@ async def process_event(
         message_id = record["messageId"]
         try:
             body = json.loads(record["body"])
-            # foodId·outboxId 는 적재 API 필수 왕복 값 — 없는 메시지는 적재 불가라
-            # 그래프(LLM 비용)를 태우기 전에 여기서 계약 위반으로 거른다.
+            # foodId·outboxId 는 적재 API 필수 왕복 값 — 없거나 타입·값이 잘못된
+            # 메시지는 적재 불가라 그래프(LLM 비용)를 태우기 전에 여기서 거른다.
             food_id, outbox_id = body["foodId"], body["outboxId"]
             name = body["scannedName"]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            if not all(
+                type(i) is int and i > 0 for i in (food_id, outbox_id)
+            ) or not (isinstance(name, str) and name.strip()):
+                raise ValueError(f"foodId={food_id!r} outboxId={outbox_id!r} scannedName={name!r}")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             log.warning("계약 위반 메시지 %s: %s", message_id, e)
             return message_id
         async with sem:
@@ -652,19 +658,17 @@ async def process_event(
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
                 return message_id
         verdict = result["verdict"]
-        # 프롬프트 튜닝 기간이라 적재 POST 를 잠시 끈다 — 응답 필드가 아직 바뀔 수 있다.
-        # 보냈을 본문은 로그로 남겨 CloudWatch 에서 필드 변화를 검토한다.
-        # 튜닝이 끝나면 아래 블록 주석을 해제하고 이 로그 한 줄과 관련 테스트 skip 을 되돌린다.
-        log.info(
-            "적재 페이로드(전송 안 함): %s",
-            json.dumps(build_ingest_payload(result, food_id, outbox_id), ensure_ascii=False),
-        )
-        # try:
-        #     await kbap.post_food_content(build_ingest_payload(result, food_id, outbox_id))
-        # except Exception:
-        #     # 서버가 멱등이라 재시도 안전. 3회 소진(409 소프트 삭제 충돌 등)이면 DLQ로.
-        #     log.exception("적재 실패 foodId=%s (%s)", food_id, name)
-        #     return message_id
+        try:
+            await kbap.post_food_content(build_ingest_payload(result, food_id, outbox_id))
+        except DuplicateIngestError:
+            # 같은 outboxId 의 결과가 이미 반영됨(FOOD-004) — 먼저 온 처리가 이겼다.
+            # 재시도해도 결과가 같으니 성공 ACK 로 끝내 SQS 재시도·DLQ 를 막는다.
+            log.warning("중복 적재 스킵 outboxId=%s foodId=%s (%s)", outbox_id, food_id, name)
+            return None
+        except Exception:
+            # 그 밖의 4xx·5xx·응답 해석 실패·네트워크 오류 — 재시도(→소진 시 DLQ)로.
+            log.exception("적재 실패 outboxId=%s foodId=%s (%s)", outbox_id, food_id, name)
+            return message_id
         log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
         return None
 
