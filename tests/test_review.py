@@ -143,14 +143,15 @@ def test_rejects_threshold_outside_score_range(tmp_path, monkeypatch):
 
 # ===== kbap 클라이언트 =====
 
-PATH = "/api/v1/admin/foods/content-reviews"
+PATH = "/api/admin/foods/content-reviews"
 
 
 def make_client(handler) -> KbapClient:
     client = KbapClient(base_url="http://kbap.test", token="tok")
+    # 실제 클라이언트의 헤더(Authorization·X-API-Version)를 그대로 쓰고 전송만 모킹한다.
     client._client = httpx.AsyncClient(
         base_url="http://kbap.test",
-        headers={"Authorization": "Bearer tok"},
+        headers=client._client.headers,
         transport=httpx.MockTransport(handler),
     )
     return client
@@ -161,6 +162,7 @@ async def test_fetch_unwraps_base_response_payload():
         assert request.url.path == PATH
         assert request.url.params["limit"] == "50"
         assert request.headers["Authorization"] == "Bearer tok"
+        assert request.headers["X-API-Version"] == "1.0"
         return httpx.Response(
             200,
             json={

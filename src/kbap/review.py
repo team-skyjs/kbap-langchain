@@ -61,9 +61,9 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     )
 
 
-# kbap ApiPaths.ADMIN = "/api/v1/admin". base_url에는 호스트만 지정한다.
-CONTENT_REVIEWS = "/api/v1/admin/foods/content-reviews"
-# 적재 API 는 2026-08-11 개정으로 URI 버전 대신 X-API-Version 헤더 버저닝을 쓴다.
+# admin API 는 2026-08-11 개정으로 URI 버전(/api/v1) 대신 X-API-Version 헤더 버저닝을
+# 쓴다 — 구 경로는 제거됐다. base_url에는 호스트만 지정한다.
+CONTENT_REVIEWS = "/api/admin/foods/content-reviews"
 FOOD_CONTENTS = "/api/admin/foods/contents"
 
 
@@ -75,7 +75,7 @@ class KbapClient:
     def __init__(self, base_url: str, token: str):
         self._client = httpx.AsyncClient(
             base_url=base_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "X-API-Version": "1.0"},
             timeout=30.0,
         )
 
@@ -110,9 +110,7 @@ class KbapClient:
         아니라 응답 본문의 code 로만 한다. 그 밖의 응답은 전부 예외 — 호출자가
         실패로 보고해 재시도(→소진 시 DLQ) 경로를 탄다.
         """
-        resp = await self._client.post(
-            FOOD_CONTENTS, json=payload, headers={"X-API-Version": "1.0"}
-        )
+        resp = await self._client.post(FOOD_CONTENTS, json=payload)
         if resp.is_success:
             return
         try:
