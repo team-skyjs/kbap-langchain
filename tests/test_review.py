@@ -11,6 +11,7 @@ from kbap.review import (
     AVOIDANCE_CODES,
     MAX_NOTE_CHARS,
     TARGET_LANGS,
+    DuplicateIngestError,
     FieldScore,
     KbapClient,
     Scorers,
@@ -142,14 +143,15 @@ def test_rejects_threshold_outside_score_range(tmp_path, monkeypatch):
 
 # ===== kbap 클라이언트 =====
 
-PATH = "/api/v1/admin/foods/content-reviews"
+PATH = "/api/admin/foods/content-reviews"
 
 
 def make_client(handler) -> KbapClient:
     client = KbapClient(base_url="http://kbap.test", token="tok")
+    # 실제 클라이언트의 헤더(Authorization·X-API-Version)를 그대로 쓰고 전송만 모킹한다.
     client._client = httpx.AsyncClient(
         base_url="http://kbap.test",
-        headers={"Authorization": "Bearer tok"},
+        headers=client._client.headers,
         transport=httpx.MockTransport(handler),
     )
     return client
@@ -160,6 +162,7 @@ async def test_fetch_unwraps_base_response_payload():
         assert request.url.path == PATH
         assert request.url.params["limit"] == "50"
         assert request.headers["Authorization"] == "Bearer tok"
+        assert request.headers["X-API-Version"] == "1.0"
         return httpx.Response(
             200,
             json={
@@ -215,6 +218,62 @@ async def test_post_rejected_result():
         "rejectedFields": ["AVOIDANCE_SUBSTANCES", "SPICINESS"],
         "reason": "- 기피성분·매운맛(40점): 돼지고기 누락",
     }
+
+
+# ===== 적재 API (post_food_content) =====
+
+INGEST_PAYLOAD = {"outboxId": 100, "foodId": 7, "displayName": "김치찌개", "passed": True}
+
+
+async def test_post_food_content_uses_header_versioned_endpoint():
+    # 2026-08-11 개정 — admin API 는 URI 버전(/api/v1/...)을 버리고 헤더 버저닝으로 갔다.
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["version"] = request.headers.get("X-API-Version")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "payload": None})
+
+    client = make_client(handler)
+    await client.post_food_content(INGEST_PAYLOAD)
+
+    assert captured["path"] == "/api/admin/foods/contents"
+    assert captured["version"] == "1.0"
+    assert captured["body"] == INGEST_PAYLOAD
+
+
+async def test_post_food_content_food_004_raises_duplicate_error():
+    # 이미 COMPLETE 인 outboxId — 재시도해도 결과가 같으니 호출자가 구분할 수 있어야 한다.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={"success": False, "payload": None, "message": "이미 처리된 음식 콘텐츠 수집 요청입니다", "code": "FOOD-004"},
+        )
+
+    client = make_client(handler)
+    with pytest.raises(DuplicateIngestError):
+        await client.post_food_content(INGEST_PAYLOAD)
+
+
+async def test_post_food_content_other_409_is_not_duplicate():
+    # FOOD-004 만 terminal duplicate — 다른 409 를 중복으로 오인하면 실패가 조용히 사라진다.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"success": False, "payload": None, "message": "충돌", "code": "FOOD-999"})
+
+    client = make_client(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.post_food_content(INGEST_PAYLOAD)
+
+
+async def test_post_food_content_non_json_error_raises():
+    # 응답 해석 실패(HTML 에러 페이지 등)도 재시도 경로로 — 성공으로 오인하지 않는다.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Server Error")
+
+    client = make_client(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.post_food_content(INGEST_PAYLOAD)
 
 
 async def test_post_raises_on_http_error():

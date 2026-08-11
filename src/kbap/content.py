@@ -9,8 +9,9 @@ kbap(Spring) 콘텐츠 배치가 하던 생성·검수를 이 그래프가 전�
 생성 프롬프트는 kbap(Spring) infra/llm/food 운영 프롬프트를 옮긴 것이다.
 원본이 바뀌면 여기도 맞춘다. JSON 형식 지시는 structured output이 대신한다.
 
-SQS 메시지 계약(초안): body = {"scannedName": <str>, "foodId": <int, 선택>}
-foodId 는 DB 저장 후 발행하는 경우에만 실린다 — 없으면 이름이 식별자.
+SQS 메시지 계약: body = {"scannedName": <str>, "foodId": <int>, "outboxId": <int>}
+foodId·outboxId 는 필수 — 적재 API 본문에 그대로 왕복시킨다(foodId 로 대상 특정,
+outboxId 로 조건부 UPDATE 게이트). 없으면 계약 위반으로 DLQ 행이다.
 처리 결과는 kbap 적재 API로 POST 한다 — 계약은 agenthub wiki/langchain-food-ingest-contract.md.
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
@@ -26,6 +27,8 @@ import yaml
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from kbap.review import DuplicateIngestError
 
 from kbap.prompts import (
     INGREDIENTS_GEN_TEMPLATE,
@@ -587,15 +590,20 @@ def _cached_graph():
     return _graph
 
 
-def build_ingest_payload(state: dict) -> dict:
+def build_ingest_payload(state: dict, food_id: int, outbox_id: int) -> dict:
     """그래프 최종 상태 → kbap 적재 계약 요청 본문 (agenthub wiki/langchain-food-ingest-contract.md).
 
+    foodId·outboxId 는 큐 메시지에서 받은 값을 그대로 왕복시킨다 — 서버는 이름이
+    아니라 foodId 로만 대상을 찾고(2026-08-11 개정), outboxId 로 조건부 UPDATE 를
+    게이트한다.
     displayName 은 스캔 원본이 아닌 정제된 이름이다 — 콘텐츠가 그 이름 기준으로
     생성됐고, 스캔 노이즈("김치찌게 8,000원")가 DB 행 이름이 되면 안 된다.
     """
     verdict = state["verdict"]
     if not verdict.passed:
         return {
+            "outboxId": outbox_id,
+            "foodId": food_id,
             "displayName": state["cleaned_name"],
             "passed": False,
             "failureKind": verdict.failure_kind,
@@ -603,6 +611,8 @@ def build_ingest_payload(state: dict) -> dict:
         }
     ingredients = state["ingredients"]
     return {
+        "outboxId": outbox_id,
+        "foodId": food_id,
         "displayName": state["cleaned_name"],
         "passed": True,
         "description": state["description"],
@@ -613,7 +623,6 @@ def build_ingest_payload(state: dict) -> dict:
             {"code": i["code"], "inclusion_percent": i["inclusionPercent"]}
             for i in ingredients["substances"]
         ],
-        # 계약 미확정 필드 — POST 복원 전에 적재 계약(agenthub)에 longDescription 추가 합의 필요.
         "longDescription": state["long_description"],
     }
 
@@ -628,9 +637,15 @@ async def process_event(
         message_id = record["messageId"]
         try:
             body = json.loads(record["body"])
-            # foodId 는 DB 저장 전이라 아직 없을 수 있다 — 이름이 처리 단위의 식별자다.
-            food_id, name = body.get("foodId"), body["scannedName"]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            # foodId·outboxId 는 적재 API 필수 왕복 값 — 없거나 타입·값이 잘못된
+            # 메시지는 적재 불가라 그래프(LLM 비용)를 태우기 전에 여기서 거른다.
+            food_id, outbox_id = body["foodId"], body["outboxId"]
+            name = body["scannedName"]
+            if not all(
+                type(i) is int and i > 0 for i in (food_id, outbox_id)
+            ) or not (isinstance(name, str) and name.strip()):
+                raise ValueError(f"foodId={food_id!r} outboxId={outbox_id!r} scannedName={name!r}")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             log.warning("계약 위반 메시지 %s: %s", message_id, e)
             return message_id
         async with sem:
@@ -643,19 +658,17 @@ async def process_event(
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)
                 return message_id
         verdict = result["verdict"]
-        # 프롬프트 튜닝 기간이라 적재 POST 를 잠시 끈다 — 응답 필드가 아직 바뀔 수 있다.
-        # 보냈을 본문은 로그로 남겨 CloudWatch 에서 필드 변화를 검토한다.
-        # 튜닝이 끝나면 아래 블록 주석을 해제하고 이 로그 한 줄과 관련 테스트 skip 을 되돌린다.
-        log.info(
-            "적재 페이로드(전송 안 함): %s",
-            json.dumps(build_ingest_payload(result), ensure_ascii=False),
-        )
-        # try:
-        #     await kbap.post_food_content(build_ingest_payload(result))
-        # except Exception:
-        #     # 서버가 멱등이라 재시도 안전. 3회 소진(409 소프트 삭제 충돌 등)이면 DLQ로.
-        #     log.exception("적재 실패 foodId=%s (%s)", food_id, name)
-        #     return message_id
+        try:
+            await kbap.post_food_content(build_ingest_payload(result, food_id, outbox_id))
+        except DuplicateIngestError:
+            # 같은 outboxId 의 결과가 이미 반영됨(FOOD-004) — 먼저 온 처리가 이겼다.
+            # 재시도해도 결과가 같으니 성공 ACK 로 끝내 SQS 재시도·DLQ 를 막는다.
+            log.warning("중복 적재 스킵 outboxId=%s foodId=%s (%s)", outbox_id, food_id, name)
+            return None
+        except Exception:
+            # 그 밖의 4xx·5xx·응답 해석 실패·네트워크 오류 — 재시도(→소진 시 DLQ)로.
+            log.exception("적재 실패 outboxId=%s foodId=%s (%s)", outbox_id, food_id, name)
+            return message_id
         log.info("foodId=%s (%s) passed=%s %s", food_id, name, verdict.passed, verdict.reason)
         return None
 

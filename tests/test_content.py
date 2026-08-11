@@ -3,6 +3,7 @@
 import json
 from collections import defaultdict
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -22,7 +23,7 @@ from kbap.content import (
     process_event,
     valid_substances,
 )
-from kbap.review import TARGET_LANGS
+from kbap.review import TARGET_LANGS, DuplicateIngestError
 
 
 # ===== 그래프 배선·재시도 =====
@@ -251,7 +252,9 @@ def test_ingest_payload_passed_maps_contract_fields():
         "verdict": JudgeVerdict(reason="ok", passed=True),
     }
 
-    assert build_ingest_payload(state) == {
+    assert build_ingest_payload(state, food_id=1234, outbox_id=55) == {
+        "outboxId": 55,  # 큐 메시지 값 왕복 — 서버의 조건부 UPDATE 게이트
+        "foodId": 1234,  # 큐 메시지 값 왕복 — 서버는 foodId 로만 대상을 찾는다
         "displayName": "김치찌개",  # 스캔 원본이 아닌 정제된 이름
         "passed": True,
         "description": "돼지고기와 김치를 끓인 찌개",
@@ -272,7 +275,9 @@ def test_ingest_payload_failed_sends_kind_and_reason_only():
         ),
     }
 
-    assert build_ingest_payload(state) == {
+    assert build_ingest_payload(state, food_id=99, outbox_id=7) == {
+        "outboxId": 7,
+        "foodId": 99,
         "displayName": "사리 추가",
         "passed": False,
         "failureKind": "NOT_FOOD",
@@ -408,23 +413,21 @@ class FakeGraph:
 
 
 class FakeKbap:
-    def __init__(self, fail=False):
+    def __init__(self, error: Exception | None = None):
         self.posts = []
-        self.fail = fail
+        self.error = error
 
     async def post_food_content(self, payload):
-        if self.fail:
-            raise RuntimeError("kbap 5xx")
+        if self.error:
+            raise self.error
         self.posts.append(payload)
 
 
-def record(message_id: str, food_id: int, name: str) -> dict:
-    return {"messageId": message_id, "body": json.dumps({"foodId": food_id, "scannedName": name})}
-
-
-# 적재 POST 임시 비활성(프롬프트 튜닝 기간 — content.py process_event 주석 참조).
-# POST 를 되살릴 때 이 마커를 지우고 아래 skip 두 개와 주석 처리된 단언을 복원한다.
-_POST_DISABLED = pytest.mark.skip(reason="적재 POST 임시 비활성 — 프롬프트 튜닝 기간")
+def record(message_id: str, food_id: int, name: str, outbox_id: int = 1) -> dict:
+    return {
+        "messageId": message_id,
+        "body": json.dumps({"foodId": food_id, "outboxId": outbox_id, "scannedName": name}),
+    }
 
 
 async def test_all_success_posts_each_food_and_reports_no_failures():
@@ -435,13 +438,12 @@ async def test_all_success_posts_each_food_and_reports_no_failures():
 
     assert failures == []
     assert sorted(graph.calls) == ["김치찌개", "불고기"]
-    # POST 임시 비활성 동안은 아무것도 전송하지 않는다.
-    assert kbap.posts == []
-    # assert sorted(p["displayName"] for p in kbap.posts) == ["김치찌개", "불고기"]
-    # assert all(p["passed"] for p in kbap.posts)
+    assert sorted(p["displayName"] for p in kbap.posts) == ["김치찌개", "불고기"]
+    assert all(p["passed"] for p in kbap.posts)
+    # outboxId·foodId 는 큐 메시지 값이 그대로 왕복돼야 한다.
+    assert sorted((p["foodId"], p["outboxId"]) for p in kbap.posts) == [(1, 1), (2, 1)]
 
 
-@_POST_DISABLED
 async def test_failed_verdict_is_posted_with_failure_kind():
     # 판정 실패도 kbap에 적재한다(FAILED 상태 저장) — 메시지 재시도 대상이 아니다.
     verdict = JudgeVerdict(reason="번역 미달", passed=False, failure_kind="JUDGE_REJECTED")
@@ -452,19 +454,38 @@ async def test_failed_verdict_is_posted_with_failure_kind():
 
     assert failures == []
     assert kbap.posts == [
-        {"displayName": "김치찌개", "passed": False, "failureKind": "JUDGE_REJECTED", "reason": "번역 미달"}
+        {"outboxId": 1, "foodId": 1, "displayName": "김치찌개", "passed": False, "failureKind": "JUDGE_REJECTED", "reason": "번역 미달"}
     ]
 
 
-@_POST_DISABLED
-async def test_post_failure_reports_message_for_retry():
-    # 네트워크·5xx·409 전부 — POST 실패면 재시도(→3회 후 DLQ)로 보낸다.
-    graph, kbap = FakeGraph(), FakeKbap(fail=True)
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("네트워크 오류"),
+        httpx.HTTPStatusError("500", request=None, response=httpx.Response(500)),
+        httpx.HTTPStatusError("400", request=None, response=httpx.Response(400)),
+        httpx.HTTPStatusError("409 다른 코드", request=None, response=httpx.Response(409)),
+    ],
+)
+async def test_post_failure_reports_message_for_retry(error):
+    # FOOD-004 를 뺀 전부 — 네트워크·4xx·5xx·다른 409 — 재시도(→소진 시 DLQ)로 보낸다.
+    graph, kbap = FakeGraph(), FakeKbap(error=error)
     event = {"Records": [record("m1", 1, "김치찌개")]}
 
     failures = await process_event(event, graph, kbap, concurrency=20)
 
     assert failures == ["m1"]
+
+
+async def test_duplicate_food_004_is_acked_without_retry():
+    # 이미 COMPLETE 인 outboxId(FOOD-004) — 먼저 온 결과가 이미 반영됐다.
+    # 재시도·DLQ 로 보내지 않고 로그만 남기고 정상 종료한다.
+    graph, kbap = FakeGraph(), FakeKbap(error=DuplicateIngestError("outboxId=1"))
+    event = {"Records": [record("m1", 1, "김치찌개")]}
+
+    failures = await process_event(event, graph, kbap, concurrency=20)
+
+    assert failures == []
 
 
 async def test_partial_failure_reports_only_failed_message():
@@ -477,20 +498,34 @@ async def test_partial_failure_reports_only_failed_message():
 
     assert failures == ["m2"]
     # 그래프 런타임 예외는 POST하지 않는다 — FAILED에 인프라 장애를 섞지 않는다.
-    # (POST 임시 비활성 동안은 성공 건도 전송하지 않는다)
-    assert kbap.posts == []
-    # assert [p["displayName"] for p in kbap.posts] == ["김치찌개"]
+    assert [p["displayName"] for p in kbap.posts] == ["김치찌개"]
 
 
-async def test_name_only_message_is_processed():
-    # DB 저장 전에는 foodId 없이 이름만 발행된다 — 계약 위반이 아니다.
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"scannedName": "김치찌개"},  # foodId·outboxId 둘 다 없음
+        {"scannedName": "김치찌개", "foodId": 1},  # outboxId 없음
+        {"scannedName": "김치찌개", "outboxId": 1},  # foodId 없음
+        {"scannedName": "김치찌개", "foodId": 1, "outboxId": "100"},  # 타입 위반(str)
+        {"scannedName": "김치찌개", "foodId": 1, "outboxId": 0},  # 양수 아님
+        {"scannedName": "김치찌개", "foodId": -1, "outboxId": 1},  # 양수 아님
+        {"scannedName": "김치찌개", "foodId": True, "outboxId": 1},  # bool 은 int 가 아니다
+        {"scannedName": "   ", "foodId": 1, "outboxId": 1},  # 공백 이름
+        {"scannedName": None, "foodId": 1, "outboxId": 1},  # 이름 타입 위반
+    ],
+)
+async def test_invalid_message_is_contract_violation(body):
+    # foodId(대상 특정)·outboxId(조건부 UPDATE 게이트)는 적재 API 필수 왕복 값 —
+    # 없거나 타입·값이 잘못된 메시지는 적재 불가라 그래프(LLM 비용)를 태우지 않고
+    # 실패로 보고해 DLQ로 보낸다.
     graph = FakeGraph()
-    event = {"Records": [{"messageId": "m1", "body": json.dumps({"scannedName": "김치찌개"})}]}
+    event = {"Records": [{"messageId": "m1", "body": json.dumps(body)}]}
 
     failures = await process_event(event, graph, FakeKbap(), concurrency=20)
 
-    assert failures == []
-    assert graph.calls == ["김치찌개"]
+    assert failures == ["m1"]
+    assert graph.calls == []
 
 
 async def test_malformed_body_is_reported_as_failure():

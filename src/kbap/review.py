@@ -61,16 +61,21 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     )
 
 
-# kbap ApiPaths.ADMIN = "/api/v1/admin". base_url에는 호스트만 지정한다.
-CONTENT_REVIEWS = "/api/v1/admin/foods/content-reviews"
-FOOD_CONTENTS = "/api/v1/admin/foods/contents"
+# admin API 는 2026-08-11 개정으로 URI 버전(/api/v1) 대신 X-API-Version 헤더 버저닝을
+# 쓴다 — 구 경로는 제거됐다. base_url에는 호스트만 지정한다.
+CONTENT_REVIEWS = "/api/admin/foods/content-reviews"
+FOOD_CONTENTS = "/api/admin/foods/contents"
+
+
+class DuplicateIngestError(Exception):
+    """이미 COMPLETE 인 outboxId(FOOD-004) — 재시도해도 결과가 같은 종료 신호."""
 
 
 class KbapClient:
     def __init__(self, base_url: str, token: str):
         self._client = httpx.AsyncClient(
             base_url=base_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "X-API-Version": "1.0"},
             timeout=30.0,
         )
 
@@ -99,11 +104,21 @@ class KbapClient:
     async def post_food_content(self, payload: dict) -> None:
         """완성/실패 판정을 음식 단건으로 적재한다 (agenthub wiki/langchain-food-ingest-contract.md).
 
-        서버가 멱등(있으면 갱신, 없으면 저장, READY는 스킵)이라 재시도가 안전하다.
-        200 외는 전부 예외 — 409(소프트 삭제 충돌) 포함, 호출자가 실패로 보고해
-        DLQ로 보내 사람이 판단하게 한다.
+        동일 outboxId 가 이미 COMPLETE 이면 서버가 409 + code=FOOD-004 를 주는데,
+        이것만 DuplicateIngestError 로 구분한다 — 재시도해도 결과가 같아 호출자가
+        정상 종료(ACK)해야 하는 유일한 실패다. 분기는 HTTP 상태나 message 문자열이
+        아니라 응답 본문의 code 로만 한다. 그 밖의 응답은 전부 예외 — 호출자가
+        실패로 보고해 재시도(→소진 시 DLQ) 경로를 탄다.
         """
         resp = await self._client.post(FOOD_CONTENTS, json=payload)
+        if resp.is_success:
+            return
+        try:
+            code = resp.json().get("code")
+        except (json.JSONDecodeError, AttributeError):
+            code = None
+        if code == "FOOD-004":
+            raise DuplicateIngestError(f"이미 처리된 적재 요청: {payload.get('outboxId')}")
         resp.raise_for_status()
 
     async def aclose(self) -> None:
