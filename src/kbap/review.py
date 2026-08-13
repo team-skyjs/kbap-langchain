@@ -119,7 +119,12 @@ class KbapClient:
             code = None
         if code == "FOOD-004":
             raise DuplicateIngestError(f"이미 처리된 적재 요청: {payload.get('outboxId')}")
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # 4xx 원인 규명은 응답 code·본문이 전부다 — 예외 메시지에 실어 로그에 남긴다
+            e.args = (f"{e.args[0]} 응답본문={resp.text[:500]}",)
+            raise
 
     async def aclose(self) -> None:
         await self._client.aclose()
