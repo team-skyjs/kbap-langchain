@@ -678,11 +678,11 @@ async def process_event(
 
 async def _consume(event, graph, concurrency: int, callbacks: list) -> list[str]:
     # invoke마다 이벤트 루프가 새로 생기므로 httpx 클라이언트는 루프 단위로 만들고 닫는다.
-    from kbap.review import KbapClient
+    from kbap.review import KbapClient, kbap_base_url
 
     with open(os.environ.get("CONFIG_PATH", "config.yaml")) as f:
         raw = yaml.safe_load(f)
-    kbap = KbapClient(raw["kbap_api"]["base_url"], os.environ["KBAP_API_TOKEN"])
+    kbap = KbapClient(kbap_base_url(raw), os.environ["KBAP_API_TOKEN"])
     try:
         return await process_event(event, graph, kbap, concurrency, callbacks)
     finally:

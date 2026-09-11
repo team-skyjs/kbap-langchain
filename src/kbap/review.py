@@ -43,6 +43,15 @@ class AppConfig(BaseModel):
     timeout_seconds: int = Field(default=120, ge=1)
 
 
+def kbap_base_url(raw: dict) -> str:
+    """적재 API 주소 — 환경변수 KBAP_API_BASE_URL 이 config.yaml 값을 덮는다.
+
+    config.yaml 은 이미지에 구워지므로 dev·prod 가 같은 이미지를 쓰려면 주소는
+    Lambda 환경변수로 갈라야 한다(KB-549). 빈 문자열은 미설정으로 본다.
+    """
+    return os.environ.get("KBAP_API_BASE_URL") or raw["kbap_api"]["base_url"]
+
+
 def load_config(path: str = "config.yaml") -> AppConfig:
     # 상위 디렉터리까지 탐색해 .env를 읽으므로 notebooks/에서 실행한 노트북도 루트 .env를 찾는다.
     # override=False이므로 기존 환경변수가 우선하며 cron/CI가 설정한 값을 .env가 덮지 않는다.
@@ -51,7 +60,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         raw = yaml.safe_load(f)
     llm = raw["llm"]
     return AppConfig(
-        kbap_base_url=raw["kbap_api"]["base_url"],
+        kbap_base_url=kbap_base_url(raw),
         kbap_token=os.environ["KBAP_API_TOKEN"],
         model=llm["model"],
         avoidance_model=llm.get("avoidance_model", llm["model"]),

@@ -1,5 +1,7 @@
 kbap_api:
-  # 호스트까지만 입력한다. /api/v1/admin/... 경로는 클라이언트가 붙인다.
+  # 호스트까지만 입력한다. /api/admin/... 경로는 클라이언트가 붙인다.
+  # 이 값은 기본값(dev)이며 Lambda 환경변수 KBAP_API_BASE_URL 이 있으면 그쪽이 이긴다 —
+  # 이미지에 구워지는 파일이라 prod 함수는 환경변수로 주소를 가른다(KB-549).
   base_url: https://dev.kbap.site # 인증: KBAP_API_TOKEN 환경변수
 llm:
   # "provider:model" 형식이면 해당 제공자를, 접두사 없는 gemini*는 google_genai를 사용한다.
