@@ -21,6 +21,7 @@ from kbap.review import (
     build_graph,
     decide,
     description_prompt,
+    kbap_base_url,
     load_config,
     run_batch,
 )
@@ -29,6 +30,23 @@ TH = Thresholds(description=70, avoidance=70)
 
 
 # ===== 설정 =====
+
+
+def test_kbap_base_url_env_overrides_config(monkeypatch):
+    raw = {"kbap_api": {"base_url": "http://from-yaml"}}
+    monkeypatch.setenv("KBAP_API_BASE_URL", "http://from-env")
+    assert kbap_base_url(raw) == "http://from-env"
+
+
+@pytest.mark.parametrize("env", [None, ""])
+def test_kbap_base_url_falls_back_to_config(monkeypatch, env):
+    # Lambda 콘솔에 빈 값으로 등록되는 경우까지 config 폴백이어야 한다.
+    raw = {"kbap_api": {"base_url": "http://from-yaml"}}
+    if env is None:
+        monkeypatch.delenv("KBAP_API_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("KBAP_API_BASE_URL", env)
+    assert kbap_base_url(raw) == "http://from-yaml"
 
 
 def test_load_config(tmp_path, monkeypatch):
@@ -55,6 +73,24 @@ def test_load_config(tmp_path, monkeypatch):
     assert cfg.thresholds.description == 70
     assert cfg.thresholds.avoidance == 80
     assert cfg.concurrency == 3
+
+
+def test_load_config_base_url_from_env(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(textwrap.dedent("""\
+        kbap_api:
+          base_url: http://kbap.example.com
+        llm:
+          model: gemini-2.5-flash
+        thresholds:
+          description: 70
+          avoidance: 80
+        concurrency: 3
+    """))
+    monkeypatch.setenv("KBAP_API_TOKEN", "secret-token")
+    monkeypatch.setenv("KBAP_API_BASE_URL", "https://prod.kbap.site")
+
+    assert load_config(str(cfg_file)).kbap_base_url == "https://prod.kbap.site"
 
 
 def test_avoidance_model_defaults_to_model(tmp_path, monkeypatch):
