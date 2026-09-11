@@ -9,7 +9,7 @@ Lambda가 소비해 콘텐츠(번역·설명·기피성분)를 완성하고, 결
 
 - 본체: `src/kbap/content.py` — 콘텐츠 그래프 + SQS Lambda 핸들러(`kbap.main.handler`)
 - 실행: `uv run kbap review|namefix` (이관 과도기 보조 배치), 테스트: `uv run pytest`
-- 배포: `./deploy.sh` — arm64 컨테이너 이미지 → ECR `kbap/langchain` → Lambda `kbap-generate-content` (프로필 `kbap-lambda-deployer`)
+- 배포: `./deploy.sh` — arm64 컨테이너 이미지 → ECR `kbap/langchain:<sha>` → Lambda `kbap-generate-content`(dev)·`kbap-generate-content-prod`(prod, 트리거 미연결) 둘 다 갱신 (프로필 `kbap-lambda-deployer`). 환경 차이는 Lambda 환경변수 `KBAP_API_BASE_URL`·`KBAP_API_TOKEN` 뿐
 
 ## kbap-agenthub — 공유 지식 위키 (필수 참조)
 
