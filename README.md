@@ -72,8 +72,10 @@ Langfuse 키가 `.env`에 있으면 음식 1건 = 트레이스 1개로 자동 �
 `./deploy.sh` — arm64 컨테이너 이미지를 빌드해 ECR `kbap/langchain` 에 `:<git sha>`·`:latest` 로
 푸시하고 Lambda `kbap-generate-content`(dev)·`kbap-generate-content-prod`(prod) 코드를 SHA 태그로
 갱신한다(프로필 `kbap-lambda-deployer`, CI 는 main 푸시 시 자동). 두 함수는 같은 이미지이며
-환경변수 `KBAP_API_BASE_URL`·`KBAP_API_TOKEN` 만 다르다 — `config.yaml` 의 `base_url` 은 기본값(dev).
+환경변수 `KBAP_API_BASE_URL`·`KBAP_API_TOKEN` 만 다르다 — `config.yaml` 의 `base_url` 은 기본값(dev)이라
+prod 함수에 `KBAP_API_BASE_URL` 이 빠지면 결과가 조용히 dev 로 적재된다.
 prod 큐 트리거는 아직 붙이지 않았다(KB-549).
+
 롤백: `aws lambda update-function-code --function-name <fn> --image-uri 118178010621.dkr.ecr.ap-northeast-2.amazonaws.com/kbap/langchain:<이전 sha> --region ap-northeast-2`
 SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 RPM을 제어한다.
 메시지 계약: `{"scannedName": <str>, "foodId": <int>, "outboxId": <int>}` — foodId·outboxId 는
