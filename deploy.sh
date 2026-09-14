@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 반복 배포 전용: ECR 로그인 -> build(arm64) -> push -> dev·prod Lambda 코드 업데이트.
-# 1회성 작업(ECR 리포 생성, Lambda 함수 생성, SQS 트리거 연결)은 콘솔에서 한다 —
+# 1회성 작업(ECR 리포 생성, Lambda 함수 생성, SQS 트리거 연결)은 kbap-infra 프로필 CLI 로 한다 —
 # 함수 생성 시 아키텍처 arm64 를 명시할 것(기본값 x86_64 면 Runtime.InvalidEntrypoint).
 set -euo pipefail
 
@@ -13,7 +13,7 @@ REGION=ap-northeast-2
 ACCOUNT=118178010621
 REPO=kbap/langchain
 # dev·prod 는 같은 이미지를 쓰고 Lambda 환경변수(KBAP_API_BASE_URL·KBAP_API_TOKEN)만 다르다.
-# prod 큐 트리거는 아직 미연결 — 함수 코드는 main 푸시마다 같이 올라가지만 소비는 안 한다(KB-549).
+# prod 큐 트리거는 2026-09-14 연결됨 — main 푸시가 곧 prod 배포다. prod 만 가르려면 FUNCTIONS 를 나눌 것.
 FUNCTIONS=(kbap-generate-content kbap-generate-content-prod)
 REGISTRY="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 # 태그 전략: 커밋 SHA(불변)로 함수를 갱신해 "어느 커밋이 떠 있나"를 함수에서 읽고,

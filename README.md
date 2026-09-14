@@ -74,7 +74,7 @@ Langfuse 키가 `.env`에 있으면 음식 1건 = 트레이스 1개로 자동 �
 갱신한다(프로필 `kbap-lambda-deployer`, CI 는 main 푸시 시 자동). 두 함수는 같은 이미지이며
 환경변수 `KBAP_API_BASE_URL`·`KBAP_API_TOKEN` 만 다르다 — `config.yaml` 의 `base_url` 은 기본값(dev)이라
 prod 함수에 `KBAP_API_BASE_URL` 이 빠지면 결과가 조용히 dev 로 적재된다.
-prod 큐 트리거는 아직 붙이지 않았다(KB-549).
+prod 큐 `kbap-prod-generate-content-queue` 트리거는 2026-09-14 에 붙였다(dev 와 같은 설정) — 이제 main 푸시가 곧 prod 배포다.
 
 롤백: `aws lambda update-function-code --function-name <fn> --image-uri 118178010621.dkr.ecr.ap-northeast-2.amazonaws.com/kbap/langchain:<이전 sha> --region ap-northeast-2`
 SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 RPM을 제어한다.
