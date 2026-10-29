@@ -1,0 +1,219 @@
+# dev Lambda 에서 검수 엔진 A/B 평가를 돌린다(KB-913) — 로컬 키·로컬 유료 호출 없이 배포와 같은 시크릿으로.
+#   gh workflow run eval-dev.yml --ref <브랜치> -f mode=fixed -f engine=both -f split=tune -f live=false
+# 대상은 dev 함수(kbap-generate-content) 하나로 하드코딩한다. prod 함수는 이 워크플로에 등장하지 않는다.
+# 실행되는 함수 코드는 dev 에 배포된 이미지다 — 먼저 deploy.yml 수동 실행(target=dev)으로 같은 ref 를 올린다.
+# GitHub 은 기본 브랜치(main)의 이 파일에 workflow_dispatch 가 있어야 수동 실행을 허용한다.
+name: eval-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_note:
+        description: 기록용 메모(무엇을 평가하나)
+        required: false
+        default: ""
+      mode:
+        type: choice
+        options: [fixed, pipeline]
+        default: fixed
+      engine:
+        type: choice
+        options: [both, A, B]
+        default: both
+      split:
+        type: choice
+        options: [all, tune, final]
+        default: all
+      chunk_size:
+        description: invoke 1회당 항목 수(비우면 fixed 20 / pipeline 5 — 함수 Timeout 300s 기준)
+        required: false
+        default: ""
+      live:
+        description: true 면 실제 LLM·Jev 유료 호출, false 면 Lambda 안에서 모의 응답
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      dataset_source:
+        description: repo = 이 레포의 dataset_path / spec = private kbap-spec 의 평가 데이터셋(real 데이터는 공개 레포에 두지 않는다)
+        type: choice
+        options: [repo, spec]
+        default: repo
+      dataset_path:
+        description: dataset_source=repo 일 때 레포 안 데이터셋 경로
+        default: evals/decision/data/dataset.json
+
+concurrency:
+  group: deploy # 배포 중인 함수를 평가하지 않게 deploy 와 같은 그룹 — 순서대로 대기
+  cancel-in-progress: false
+  queue: max
+
+env:
+  FUNCTION: kbap-generate-content # dev 전용, 하드코딩
+  AWS_REGION: ap-northeast-2
+  SPEC_DATASET: reports/jev-decision-2026-10-30/dataset-manifest.json
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      # dataset_source=spec — 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 그래서
+      # ① private kbap-spec 에서 데이터셋을 읽고 ② 결과는 암호화해서만 올린다. 시크릿이 없으면
+      # 유료 호출 전에 중단한다(SPEC_READ_TOKEN: kbap-spec contents:read, EVAL_RESULT_PASSPHRASE: 결과 암호).
+      - name: check spec secrets
+        if: inputs.dataset_source == 'spec'
+        env:
+          HAS_TOKEN: ${{ secrets.SPEC_READ_TOKEN != '' }}
+          HAS_PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE != '' }}
+        run: |
+          [ "$HAS_TOKEN" = true ] || { echo "::error::SPEC_READ_TOKEN 시크릿 없음 — kbap-spec contents:read fine-grained 토큰을 추가한다"; exit 1; }
+          [ "$HAS_PASS" = true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — public 레포 artifact 를 평문으로 올리지 않는다"; exit 1; }
+      - uses: actions/checkout@v4
+        if: inputs.dataset_source == 'spec'
+        with:
+          repository: team-skyjs/kbap-spec
+          ref: main
+          token: ${{ secrets.SPEC_READ_TOKEN }}
+          path: _spec
+          sparse-checkout: ${{ env.SPEC_DATASET }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: resolve dataset
+        env:
+          SOURCE: ${{ inputs.dataset_source }}
+          REPO_PATH: ${{ inputs.dataset_path }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" = spec ]; then f="_spec/$SPEC_DATASET"; else f="$REPO_PATH"; fi
+          [ -f "$f" ] || { echo "::error::데이터셋 없음: $f"; exit 1; }
+          echo "DATASET=$f" >> "$GITHUB_ENV"
+          echo "데이터셋: $f ($(jq '.items | length' "$f")건, $(jq -r .dataset_version "$f"))"
+
+      # 서드파티 액션은 커밋 SHA 고정. uv 설치·의존성 동기화는 AWS 자격증명이 환경에 들어오기 전에 끝낸다.
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - run: uv sync --frozen
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      # ① 평가 플래그 — 없으면 켠다. 환경변수 맵은 통째로 교체되므로 기존 값을 읽어 병합한다.
+      #    값(API 토큰·Jev 키)은 출력하지 않고 마스킹하며, ④의 유출 검사용으로 러너 임시 디렉터리에만 둔다.
+      - name: enable eval flag on dev function
+        run: |
+          set -euo pipefail
+          test "$FUNCTION" = kbap-generate-content
+          # 직전 dev 배포의 이미지 갱신이 끝나기 전엔 이전 코드로 호출되고 설정 갱신은 실패한다 — 먼저 기다린다.
+          aws lambda wait function-updated --function-name "$FUNCTION"
+          env_json="$RUNNER_TEMP/env.json"
+          aws lambda get-function-configuration --function-name "$FUNCTION" \
+            --query 'Environment.Variables' --output json > "$env_json"
+          jq -r 'to_entries[] | .value' "$env_json" | while IFS= read -r v; do
+            [ -n "$v" ] && echo "::add-mask::$v"
+          done
+          if [ "$(jq -r '.KBAP_EVAL_ENABLED // ""' "$env_json")" = true ]; then
+            echo "KBAP_EVAL_ENABLED 이미 true"
+          else
+            jq '{Variables: (. + {KBAP_EVAL_ENABLED: "true"})}' "$env_json" > "$RUNNER_TEMP/env-new.json"
+            aws lambda update-function-configuration --function-name "$FUNCTION" \
+              --environment "file://$RUNNER_TEMP/env-new.json" --query 'LastUpdateStatus' --output text
+            rm -f "$RUNNER_TEMP/env-new.json"
+            aws lambda wait function-updated --function-name "$FUNCTION"
+            echo "KBAP_EVAL_ENABLED=true 반영(다른 변수 보존: $(jq 'length' "$env_json")개 키)"
+          fi
+          aws lambda get-function --function-name "$FUNCTION" --query 'Code.ImageUri' --output text
+
+      # ② 조각 invoke — 실패한 조각은 건너뛰고 끝에 목록을 남긴다.
+      - name: invoke chunks
+        env:
+          MODE: ${{ inputs.mode }}
+          ENGINE: ${{ inputs.engine }}
+          SPLIT: ${{ inputs.split }}
+          CHUNK: ${{ inputs.chunk_size }}
+          LIVE: ${{ inputs.live }}
+        run: |
+          set -euo pipefail
+          size="${CHUNK:-}"
+          [ -n "$size" ] || size=$([ "$MODE" = fixed ] && echo 20 || echo 5)
+          [[ "$size" =~ ^[1-9][0-9]*$ ]] || { echo "chunk_size 는 양의 정수: $size" >&2; exit 1; }
+          split_json=$([ "$SPLIT" = all ] && echo null || echo "\"$SPLIT\"")
+          sel='[.items[] | select($split == null or .split == $split)'
+          sel+=$([ "$MODE" = pipeline ] && echo ' | select(.scanned_name != null)]' || echo ']')
+          jq --argjson split "$split_json" "$sel" "$DATASET" > "$RUNNER_TEMP/items.json"
+          total=$(jq length "$RUNNER_TEMP/items.json")
+          echo "항목 $total 개, 조각 크기 $size, live=$LIVE"
+          mkdir -p "$RUNNER_TEMP/resp"
+          : > "$RUNNER_TEMP/failed.txt"
+          i=0
+          for ((start = 0; start < total; start += size)); do
+            i=$((i + 1))
+            jq --slurpfile items "$RUNNER_TEMP/items.json" --argjson s "$start" --argjson n "$size" \
+              --arg mode "$MODE" --arg engine "$ENGINE" --argjson live "$LIVE" \
+              '{eval: {mode: $mode, engine: $engine, live: $live, concurrency: 4,
+                dataset: {dataset_version, items: $items[0][$s:$s + $n]}}}' "$DATASET" > "$RUNNER_TEMP/ev.json"
+            out="$RUNNER_TEMP/resp/$(printf %03d "$i").json"
+            if aws lambda invoke --function-name "$FUNCTION" --cli-binary-format raw-in-base64-out \
+                 --cli-read-timeout 900 --payload "file://$RUNNER_TEMP/ev.json" "$out" \
+                 --query 'FunctionError' --output text > "$RUNNER_TEMP/fe.txt" \
+               && [ "$(cat "$RUNNER_TEMP/fe.txt")" = None ] \
+               && jq -e '.manifest and (.rows != null)' "$out" > /dev/null; then
+              echo "조각 $i 완료"
+            else
+              # 본문은 출력하지 않는다(데이터셋 텍스트가 섞일 수 있고 public 레포 로그는 공개된다).
+              echo "조각 $i 실패(시작 $start): $(jq -r '.errorType // (if .eval then "eval=\(.eval)" else "결과 없음" end)' "$out" 2>/dev/null || echo 응답 없음)"
+              echo "$i start=$start" >> "$RUNNER_TEMP/failed.txt"
+              rm -f "$out"
+            fi
+          done
+          [ -s "$RUNNER_TEMP/failed.txt" ] && { echo "실패 조각:"; cat "$RUNNER_TEMP/failed.txt"; } || true
+
+      # ③ 지표표·불일치 CSV·manifest
+      - name: collect
+        env:
+          NOTE: ${{ inputs.ref_note }}
+        run: |
+          set -euo pipefail
+          run_id="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:0:8}"
+          echo "RUN_DIR=evals/decision/runs/$run_id" >> "$GITHUB_ENV"
+          mkdir -p "evals/decision/runs/$run_id"
+          cp "$RUNNER_TEMP/failed.txt" "evals/decision/runs/$run_id/failed_chunks.txt"
+          printf '%s\n' "$NOTE" > "evals/decision/runs/$run_id/note.txt"
+          shopt -s nullglob
+          resp=("$RUNNER_TEMP"/resp/*.json)
+          if [ ${#resp[@]} -eq 0 ]; then echo "성공한 조각 없음"; exit 1; fi
+          # 요약(지표표)만 잡 요약에 싣는다 — 행·불일치 목록은 artifact 로만.
+          uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" > /dev/null
+          cat "evals/decision/runs/$run_id/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # ④ 업로드 전 유출 검사 — 함수 환경변수 값(8자 이상)이 결과에 섞였으면 업로드하지 않는다.
+      - name: leak check
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | .value | select(length >= 8)' "$RUNNER_TEMP/env.json" > "$RUNNER_TEMP/secrets.txt"
+          if [ -s "$RUNNER_TEMP/secrets.txt" ] && grep -rFqf "$RUNNER_TEMP/secrets.txt" "$RUN_DIR"; then
+            echo "결과에 함수 환경변수 값이 들어 있다 — 업로드 중단" >&2
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/secrets.txt" "$RUNNER_TEMP/env.json"
+          echo "유출 검사 통과"
+
+      # spec 데이터는 암호화해서만 올린다: gpg --decrypt <파일> | tar -xz
+      - name: encrypt results (spec)
+        if: inputs.dataset_source == 'spec'
+        env:
+          PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          tar -czf - -C "$RUN_DIR" . | gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase-fd 3 3<<<"$PASS" -o "$RUNNER_TEMP/results.tar.gz.gpg"
+          rm -rf "$RUN_DIR" && mkdir -p "$RUN_DIR" && mv "$RUNNER_TEMP/results.tar.gz.gpg" "$RUN_DIR/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-dev-${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ env.RUN_DIR }}
+          retention-days: 30
