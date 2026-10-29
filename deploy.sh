@@ -13,6 +13,12 @@ case "${1:-}" in
   "") ;;
   *) echo "사용법: $0 [--dev-only]" >&2; exit 2 ;;
 esac
+DEV_FUNCTION=kbap-generate-content
+# 수동 실행(workflow_dispatch)은 어느 브랜치에서든 돌 수 있으므로 dev 전용으로만 허용한다.
+if [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ] && ! $DEV_ONLY; then
+  echo "workflow_dispatch 는 --dev-only 로만 실행한다 — prod 는 main 푸시 경로" >&2
+  exit 1
+fi
 
 # 로컬: 배포 전용 최소권한 유저 프로필 (default 프로필은 다른 계정이다).
 # CI(GitHub Actions): 프로필 없이 env 자격증명(AWS_ACCESS_KEY_ID 등)을 쓴다.
@@ -26,7 +32,7 @@ REPO=kbap/langchain
 # prod 큐 트리거는 2026-09-14 연결됨 — main 푸시가 곧 prod 배포다. prod 만 가르려면 FUNCTIONS 를 나눌 것.
 FUNCTIONS=(kbap-generate-content kbap-generate-content-prod)
 if $DEV_ONLY; then
-  FUNCTIONS=(kbap-generate-content) # 함수명 하드코딩 — prod 함수는 이 모드에서 절대 갱신하지 않는다
+  FUNCTIONS=("$DEV_FUNCTION") # 함수명 하드코딩 — prod 함수는 이 모드에서 절대 갱신하지 않는다
 fi
 REGISTRY="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 # 태그 전략: 커밋 SHA(불변)로 함수를 갱신해 "어느 커밋이 떠 있나"를 함수에서 읽고,
