@@ -38,7 +38,6 @@ from kbap.prompts import (
     DESC_TR_TEMPLATE,
     LONG_DESC_TEMPLATE,
     NAME_REVIEW_TEMPLATE,
-    JUDGE_TEMPLATE,
     NAME_TR_TEMPLATE,
     render_prompt,
 )
@@ -76,8 +75,8 @@ class JudgeVerdict(BaseModel):
     reason: str
     passed: bool
     rejected_fields: list[str] = []
-    # kbap 적재 계약의 failureKind — LLM 출력이 아니라 세 생성 지점의 코드가 찍는다.
-    # (정제 조기 종료→NOT_FOOD, 기피성분 가드→INGREDIENT_GUARD, 그 외 judge 탈락→JUDGE_REJECTED)
+    # kbap 적재 계약의 failureKind — 두 생성 지점의 코드가 찍는다.
+    # (정제 조기 종료→NOT_FOOD, judge 규칙: 기피성분 불통과→INGREDIENT_GUARD, 설명 미달→JUDGE_REJECTED)
     failure_kind: str | None = None
 
 
@@ -91,7 +90,6 @@ class ContentFns(NamedTuple):
     generate_long_description: Callable[[str], Awaitable[str]]
     review_description: Callable[[str, str], Awaitable[DescReview]]  # 한국어 설명만 검수
     review_ingredients: Callable[[str, dict], Awaitable[IngredientsReview]]
-    judge: Callable[[dict], Awaitable[JudgeVerdict]]
 
 
 class ContentState(TypedDict, total=False):
@@ -195,22 +193,24 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         text = await fns.generate_long_description(state["cleaned_name"])
         return {"long_description": text}
 
-    # ⑤ 종합 판정 — 분기가 모두 끝난 뒤(defer) 검수 결과·사유로 PASS/FAIL을 최종 결정한다.
-    # 기피성분만은 결정론적 fail-closed: 프롬프트의 "불통과는 탈락" 지시는 강제력이
-    # 없고, 알레르기 데이터는 오통과가 누락보다 위험하다(valid_substances 필터와 같은 철학).
-    async def judge(state: ContentState):
-        verdict = await fns.judge(dict(state))
-        if not verdict.passed:
-            # LLM 출력의 failure_kind 는 신뢰하지 않고 덮어쓴다 — 계약 밖 enum 값 차단.
-            verdict = verdict.model_copy(update={"failure_kind": "JUDGE_REJECTED"})
-        ingredient = state["ingredient_review"]
-        if verdict.passed and not ingredient.passed:
-            verdict = JudgeVerdict(
-                passed=False,
-                reason=f"기피성분 검수 불통과: {ingredient.reason}",
-                rejected_fields=["avoidance"],
-                failure_kind="INGREDIENT_GUARD",
-            )
+    # ⑤ 종합 판정 — 분기가 모두 끝난 뒤(defer) 규칙으로 PASS/FAIL을 정한다(LLM 없음, KB-897).
+    # 입력이 설명 점수·기피성분 통과 여부 둘뿐이라 LLM 판정은 규칙을 흔들 뿐이었다(2점도 통과 가능).
+    # 둘 다 미달이면 INGREDIENT_GUARD 가 이긴다 — 알레르기 데이터는 오통과가 누락보다 위험하다.
+    def judge(state: ContentState):
+        desc, ingredient = state["description_score"], state["ingredient_review"]
+        rejected, reasons = [], []
+        if not ingredient.passed:
+            rejected.append("avoidance")
+            reasons.append(f"기피성분 검수 불통과: {ingredient.reason}")
+        if desc.score < DESC_PASS_SCORE:
+            rejected.append("description")
+            reasons.append(f"설명 {desc.score}/{DESC_PASS_SCORE}점: {desc.reason}")
+        if not rejected:
+            return {"verdict": JudgeVerdict(reason="설명 3점·기피성분 검수 통과", passed=True)}
+        kind = "INGREDIENT_GUARD" if "avoidance" in rejected else "JUDGE_REJECTED"
+        verdict = JudgeVerdict(
+            reason=" / ".join(reasons), passed=False, rejected_fields=rejected, failure_kind=kind
+        )
         return {"verdict": verdict}
 
     # 설명은 3점 만점(DESC_PASS_SCORE)만 통과, 기피성분은 통과/불통과 — 미달이면 1회 재생성.
@@ -226,7 +226,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
             return "generate_ingredients"
         return "judge"
 
-    # structured output 파싱 실패 시 재시도 — kbap_review.graph와 같은 이유이며 모두 LLM 노드다.
+    # structured output 파싱 실패 시 재시도 — kbap_review.graph와 같은 이유. judge·reject_name 외엔 모두 LLM 노드다.
     retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ContentState)
     g.add_node("clean_name", clean_name, retry_policy=retry)
@@ -239,8 +239,8 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     g.add_node("generate_ingredients", generate_ingredients, retry_policy=retry)
     g.add_node("review_ingredients", review_ingredients, retry_policy=retry)
     g.add_node("generate_long_description", generate_long_description, retry_policy=retry)
-    # defer=True — 세 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다.
-    g.add_node("judge", judge, defer=True, retry_policy=retry)
+    # defer=True — 네 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다. LLM 없음 — 재시도 불필요.
+    g.add_node("judge", judge, defer=True)
 
     g.add_edge(START, "clean_name")
     g.add_edge("clean_name", "review_name")
@@ -445,34 +445,17 @@ def ingredients_review_prompt(name: str, ingredients: dict) -> str:
     )
 
 
-def judge_prompt(state: dict) -> str:
-    # 조건·반복이 있는 부분은 코드에서 미리 계산해 변수로 넣는다 — Langfuse 템플릿엔 로직이 없다.
-    desc = state["description_score"]
-    ingredient = state["ingredient_review"]
-    lines = "\n".join(
-        [
-            f"- 설명: {desc.score}/3점 — {desc.reason}",
-            f"- 기피성분·매운맛: {'통과' if ingredient.passed else '불통과'} — {ingredient.reason}",
-        ]
-    )
-    return render_prompt(
-        "food-judge", JUDGE_TEMPLATE, name=state["cleaned_name"], score_lines=lines
-    )
-
-
 def make_fns(
     model: str,
     timeout: int,
-    judge_model: str | None = None,
     gen_model: str | None = None,
     namefix_model: str | None = None,
     callbacks: list = [],
 ):
     """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다.
 
-    역할별 모델 분리: judge 는 짧은 점수 요약을 읽고 통과/탈락만 정하므로 저렴한 모델로
-    내릴 수 있고(judge_model), 이름 정제는 _plausible·길이 방어선이 있어 실패해도 원본
-    유지로 끝나므로 역시 내릴 수 있다(namefix_model). 품질이 곧 결과물인 번역·설명 생성만
+    역할별 모델 분리: 이름 정제는 _plausible·길이 방어선이 있어 실패해도 원본
+    유지로 끝나므로 저렴한 모델로 내릴 수 있다(namefix_model). 품질이 곧 결과물인 번역·설명 생성만
     올릴 수 있다(gen_model). 기피성분 생성·검수는 안전 데이터라 기본 모델(model)을 유지한다.
 
     callbacks 는 노드를 그래프 밖에서 직접 호출할 때(노트북) 트레이싱용이다.
@@ -486,7 +469,6 @@ def make_fns(
 
     base = init_model(model, timeout)
     gen_base = init_model(gen_model, timeout) if gen_model and gen_model != model else base
-    judge_llm = _bind(init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict))
     tr_llm = _bind(gen_base.with_structured_output(Translations))
     desc_llm = _bind(gen_base.with_structured_output(DescGen))
     long_desc_llm = _bind(gen_base.with_structured_output(LongDescGen))
@@ -498,8 +480,7 @@ def make_fns(
     normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
     async def clean_name(name: str, feedback: str) -> dict:
-        # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정된 음식명을 앵커로 주입
-        return await clean_one(name, [], normalize, feedback)
+        return await clean_one(name, normalize, feedback)
 
     async def review_name(original: str, cleaned: str) -> NameReview:
         return await name_review_llm.ainvoke(name_review_prompt(original, cleaned))
@@ -535,9 +516,6 @@ def make_fns(
     async def review_ingredients(name: str, ingredients: dict) -> IngredientsReview:
         return await ingredients_review_llm.ainvoke(ingredients_review_prompt(name, ingredients))
 
-    async def judge(state: dict) -> JudgeVerdict:
-        return await judge_llm.ainvoke(judge_prompt(state))
-
     return ContentFns(
         clean_name=clean_name,
         review_name=review_name,
@@ -548,7 +526,6 @@ def make_fns(
         generate_long_description=generate_long_description,
         review_description=review_description,
         review_ingredients=review_ingredients,
-        judge=judge,
     )
 
 
@@ -572,7 +549,6 @@ def load_graph(config_path: str | None = None):
     fns = make_fns(
         llm["model"],
         llm.get("timeout_seconds", 120),
-        judge_model=llm.get("judge_model"),
         gen_model=llm.get("gen_model"),
         namefix_model=llm.get("namefix_model"),
     )

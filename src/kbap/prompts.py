@@ -190,6 +190,8 @@ present(들어갈 가능성 있는)만 나열한다. 사실상 0%인 성분은 �
 - 어묵·맛살·게맛살·크래미: FISH 90+, WHEAT 70+
 - 멸치육수·다시: ANCHOVY 60~85, FISH 70+, DASHI 40+
 - 사골·고기육수: BEEF 또는 PORK 70+, BROTH
+- 고기 육수 국물 요리(국밥·탕·곰탕·갈비탕·냉면 육수 등): MEAT_BROTH 80+, BROTH
+- 양고기(양꼬치·양갈비·양고기 탕·훠궈 양고기): LAMB 95+
 - 액젓·멸치액젓(김치·양념): FISH_SAUCE 80+, ANCHOVY, FISH
 - 새우젓(돼지·순대·만두양념): SALTED_SHRIMP, SHRIMP
 - 굴소스: OYSTER_SAUCE, OYSTER
@@ -260,20 +262,6 @@ reason 은 한국어 한 문장 — 불통과면 무엇을 고쳐야 하는지 �
 재생성 프롬프트에 그대로 전달됩니다.
 
 reason, passed 를 반환하세요."""
-
-JUDGE_TEMPLATE = """당신은 한국 음식 콘텐츠의 최종 판정자입니다. 필드별 검수 결과와 사유를 보고
-이 음식 콘텐츠를 통과(passed=true)시킬지 판정하세요.
-
-원칙:
-- 기준 미달 필드(설명 3점 미만, 기피성분 불통과)가 있으면 원칙적으로 탈락이며,
-  rejected_fields 에 해당 필드를 담으세요. 필드 이름은 다음 중에서만: description, avoidance
-- 기준을 넘겼어도 사유에 안전 문제(기피성분 누락 등)가 보이면 탈락시키세요.
-
-음식 이름: {{name}}
-검수 결과:
-{{score_lines}}
-
-reason(한국어 1~2문장), passed, rejected_fields 를 반환하세요."""
 
 # ===== 검수 배치 (과도기 — 스프링이 생성한 콘텐츠 채점) =====
 
@@ -347,7 +335,7 @@ PROMPTS = {
     "food-ingredients": INGREDIENTS_GEN_TEMPLATE,
     "food-description-review": DESC_REVIEW_TEMPLATE,
     "food-ingredients-review": INGREDIENTS_REVIEW_TEMPLATE,
-    "food-judge": JUDGE_TEMPLATE,
+    # food-judge 는 KB-897 에서 규칙 판정으로 대체돼 더 이상 쓰이지 않는다(Langfuse 에 남아 있어도 무해).
     # 과도기 검수 배치용 food-review-* 는 Langfuse 에서 제거됨 — 배치는 코드 폴백
     # 템플릿(REVIEW_*_TEMPLATE)으로 동작하며, 배치 은퇴 시 템플릿도 함께 삭제한다.
 }
