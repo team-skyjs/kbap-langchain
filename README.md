@@ -50,6 +50,33 @@ LLM 호출 수(음식 1건):
 
 기본 9회는 `test_default_run_makes_exactly_nine_llm_calls`가 잠근다. structured output 파싱 실패 재시도(RetryPolicy)는 별도다.
 
+## 검수 엔진 (KB-913)
+
+검수 3곳(이름·설명·기피성분)만 엔진을 고를 수 있다. 생성·최종 판정(코드 규칙)은 엔진과 무관하다.
+
+| 설정 | 값 |
+|---|---|
+| `config.yaml` `review_engine` | `llm`(기본·운영) \| `jev`(TypeSafe Jev) |
+| 환경변수 `REVIEW_ENGINE` | config 보다 우선 — dev·prod 가 같은 이미지라 dev 함수에서만 켤 때 쓴다 |
+| `TYPESAFE_API_KEY` | `jev` 일 때 필수, 없으면 콜드 스타트 실패. 코드·로그·결과 파일에 남기지 않는다 |
+| `config.yaml` `jev.model` / `timeout_seconds` / `max_attempts` / `policy` | 모델 버전 고정(`jev-1.14.0`), 타임아웃·재시도, 확률 임계값(보정 전 기본값은 `kbap.jev.JevPolicy`) |
+
+Jev 판정은 PASS / REVISE / ABSTAIN 이다. 질문 문구·기준·임계값·피드백 문구는 전부 `src/kbap/jev.py` 한 곳에 있다.
+
+| 상황 | 처리 |
+|---|---|
+| PASS, REVISE(사유 코드 있음) | Jev 판정 사용. 재생성 피드백은 사유 코드별 고정 문구 |
+| ABSTAIN(확률이 임계값 사이), REVISE 인데 사유 코드 없음 | 기존 LLM 검수로 대체 |
+| 5xx·529·연결 실패 | 재시도(`max_attempts`) 후 기존 LLM 검수로 대체 |
+| timeout·429 | 재시도 후 예외 → 메시지 실패(SQS 재시도). `passed=false`·빈 성분으로 적재하지 않는다 |
+| 400·401·403·413·415·422 | 재시도 없이 예외 → 메시지 실패 |
+
+Jev 예외는 그래프 RetryPolicy 대상이 아니라 Jev 재시도 × 그래프 재시도가 곱해지지 않는다.
+대체 여부·확률 원본·버전·사용량·지연은 그래프 상태 `review_traces` 에만 남고 적재 payload 에는 나가지 않는다.
+재시도 없는 정상 1건은 `jev` 일 때 LLM 6회 + Jev 3회다.
+
+오프라인 A/B 평가는 [`evals/decision/`](evals/decision/README.md).
+
 ## 구조
 
 ```
@@ -59,6 +86,8 @@ src/kbap/
   review.py        # 과도기: 스프링이 생성한 콘텐츠의 검수 전용 배치 (이관 완료 시 은퇴)
   namefix.py       # 이름 정제 — 파이프라인 첫 단계, content 가 재사용
   prompts.py       # 프롬프트 템플릿 전부 (소스는 Langfuse, 여기는 폴백)
+  jev.py           # 검수 3곳 Jev 구현 — 질문·임계값·사유 코드·대체 정책 (KB-913)
+evals/decision/                    # 검수 엔진 오프라인 A/B 평가 도구
 scripts/upload_prompts.py          # 프롬프트 레지스트리 → Langfuse 최초 업로드
 notebooks/content_pipeline.ipynb   # 그래프 시각화·단건 실행
 config.yaml                        # 노드별 모델·타임아웃·동시성

@@ -16,17 +16,18 @@ outboxId 로 조건부 UPDATE 게이트). 없으면 계약 위반으로 DLQ 행�
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
 from collections.abc import Awaitable, Callable
-from typing import NamedTuple, TypedDict
+from typing import Annotated, NamedTuple, TypedDict
 import asyncio
 import json
 import logging
+import operator
 import os
 import re
 import yaml
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from kbap.review import DuplicateIngestError
 
@@ -51,7 +52,13 @@ from kbap.review import (
 
 # is_food 를 passed 와 분리한 이유: 비음식은 재정제해도 음식이 안 되므로
 # 재정제 루프 없이 즉시 종료해 콜을 아낀다.
-class NameReview(BaseModel):
+class _Traced(BaseModel):
+    # 검수 엔진의 판정 근거(확률 원본·사유 코드·버전·사용량·지연·대체 여부) — KB-913.
+    # PrivateAttr 라 structured output 스키마와 적재 payload 에 나가지 않는다. LLM 엔진은 비워 둔다.
+    _trace: dict | None = PrivateAttr(default=None)
+
+
+class NameReview(_Traced):
     reason: str
     is_food: bool
     passed: bool
@@ -61,12 +68,12 @@ class NameReview(BaseModel):
 DESC_PASS_SCORE = 3
 
 
-class DescReview(BaseModel):
+class DescReview(_Traced):
     reason: str
     score: int = Field(ge=1, le=3)
 
 
-class IngredientsReview(BaseModel):
+class IngredientsReview(_Traced):
     reason: str
     passed: bool
 
@@ -111,6 +118,13 @@ class ContentState(TypedDict, total=False):
     ingredient_feedback: str
     long_description: str  # 벡터 검색 메타데이터 (화면 미노출)
     verdict: JudgeVerdict
+    review_traces: Annotated[list[dict], operator.add]  # 검수 엔진 판정 근거 — 평가·관측용, payload 미포함
+
+
+def _traced(review: _Traced, update: dict) -> dict:
+    if review._trace:
+        update["review_traces"] = [review._trace]
+    return update
 
 
 def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempts: int = 3):
@@ -130,7 +144,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 여기를 통과해야만 생성 분기가 시작된다.
     async def review_name(state: ContentState):
         r = await fns.review_name(state["food_name"], state["cleaned_name"])
-        return {"name_review": r, "name_feedback": r.reason}
+        return _traced(r, {"name_review": r, "name_feedback": r.reason})
 
     # 비음식·재정제 소진 — NOT_FOOD verdict 를 만들고 그래프를 끝내 생성·검수 콜을 아낀다.
     async def reject_name(state: ContentState):
@@ -170,7 +184,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 설명 검수 — 한국어 설명만 본다. 번역보다 먼저 실행해 탈락한 설명의 번역을 만들지 않는다.
     async def review_description(state: ContentState):
         score = await fns.review_description(state["cleaned_name"], state["description"])
-        return {"description_score": score, "description_feedback": score.reason}
+        return _traced(score, {"description_score": score, "description_feedback": score.reason})
 
     # 설명 번역 생성(분기 2 후속) — 확정된 설명으로 1회만
     async def generate_description_translations(state: ContentState):
@@ -185,7 +199,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 기피성분·매운맛 검수(분기 3 후속) — 불통과면 재생성
     async def review_ingredients(state: ContentState):
         r = await fns.review_ingredients(state["cleaned_name"], state["ingredients"])
-        return {"ingredient_review": r, "ingredient_feedback": r.reason}
+        return _traced(r, {"ingredient_review": r, "ingredient_feedback": r.reason})
 
     # ④' 검색용 긴 설명(분기 4) — 벡터 DB 메타데이터. 안전 직결이 아니라 검수·judge 판정에
     # 참여하지 않는다. 검색 품질 문제가 실측되면 그때 검수를 붙인다.
@@ -552,7 +566,27 @@ def load_graph(config_path: str | None = None):
         gen_model=llm.get("gen_model"),
         namefix_model=llm.get("namefix_model"),
     )
-    return build_content_graph(fns)
+    return build_content_graph(apply_review_engine(fns, raw))
+
+
+def apply_review_engine(fns: ContentFns, raw: dict, engine: str | None = None) -> ContentFns:
+    """검수 3곳의 엔진을 고른다(KB-913). 기본 llm — 생성 함수와 호출 수는 그대로다.
+
+    환경변수 REVIEW_ENGINE 이 config 의 review_engine 을 이긴다 — dev·prod 가 같은 이미지라
+    dev 함수에서만 jev 를 켤 수 있어야 한다. jev 인데 TYPESAFE_API_KEY 가 없으면 콜드 스타트에서 죽는다
+    (조용히 llm 으로 돌면 실험군이 섞인다).
+    """
+    engine = engine or os.environ.get("REVIEW_ENGINE") or raw.get("review_engine", "llm")
+    if engine == "llm":
+        return fns
+    if engine != "jev":
+        raise ValueError(f"review_engine 은 llm|jev: {engine!r}")
+    from kbap.jev import JevPolicy, JevReviews, JevSettings, with_jev_reviews
+
+    jev = dict(raw.get("jev") or {})
+    policy = JevPolicy(**jev.pop("policy", {}))
+    settings = JevSettings(api_key=os.environ["TYPESAFE_API_KEY"], **jev)
+    return with_jev_reviews(fns, JevReviews(settings, fns, policy))
 
 
 _graph = None
