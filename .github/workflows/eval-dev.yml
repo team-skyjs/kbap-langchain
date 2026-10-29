@@ -53,7 +53,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      # 서드파티 액션은 커밋 SHA 고정. uv 설치·의존성 동기화는 AWS 자격증명이 환경에 들어오기 전에 끝낸다.
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - run: uv sync --frozen
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -129,7 +133,6 @@ jobs:
           [ -s "$RUNNER_TEMP/failed.txt" ] && { echo "실패 조각:"; cat "$RUNNER_TEMP/failed.txt"; } || true
 
       # ③ 지표표·불일치 CSV·manifest
-      - uses: astral-sh/setup-uv@v6
       - name: collect
         env:
           DATASET: ${{ inputs.dataset_path }}
