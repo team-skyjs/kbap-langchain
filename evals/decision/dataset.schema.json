@@ -130,6 +130,22 @@
           "default": "",
           "title": "Note",
           "type": "string"
+        },
+        "label_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "draft",
+                "reviewed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Status"
         }
       },
       "required": [

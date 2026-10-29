@@ -77,6 +77,8 @@ class Item(BaseModel):
     ingredients: IngredientsInput | None = None
     labels: Labels = Labels()
     note: str = ""
+    # 라벨 확정 상태 — draft 가 섞이면 지표는 잠정이다(manifest·summary 에 표시).
+    label_status: Literal["draft", "reviewed"] | None = None
 
 
 class Dataset(BaseModel):
@@ -241,6 +243,7 @@ def build_manifest(command: str, live: bool, ds: "Dataset", dataset_sha256: str,
         "dataset_sha256": dataset_sha256,
         "split": split,
         "items": len(ds.items),
+        "label_status": {k: sum(i.label_status == k for i in ds.items) for k in ("draft", "reviewed", None)},
         **engine_record,
         "jev_policy_version": jev.POLICY_VERSION,
         "jev_questions": {
@@ -508,6 +511,9 @@ def summary_text(manifest: dict, items: dict[str, Item], fixed_rows: list[dict],
         "",
         f"- 코드 `{version}`{dirty} · dataset `{manifest['dataset_version']}` · split {manifest.get('split') or '전체'} · 엔진 {'/'.join(manifest['engines'])} · Jev 정책 `{manifest['jev_policy_version']}`",
     ]
+    drafts = (manifest.get("label_status") or {}).get("draft", 0)
+    if drafts:
+        head.append(f"- **라벨 초안 {drafts}건 포함 — 지표는 잠정이다.** 사람 검토로 확정한 뒤 다시 집계한다.")
     if manifest["mode"] == "mock":
         head.append("- **모의 응답 실행 — 정확도·지연·비용의 증거가 아니다.** 도구 동작 확인용.")
     body, dis = [], []

@@ -183,3 +183,17 @@ def test_collect_turns_lambda_responses_into_run_files(ev, monkeypatch, tmp_path
 
     assert (out / "results.jsonl").exists() and (out / "manifest.json").exists()
     assert "고정 입력 검수" in text
+
+
+def test_draft_labels_are_flagged_in_manifest_and_summary(ev, monkeypatch, tmp_path):
+    data = json.loads(SAMPLE.read_text())
+    for item in data["items"]:
+        item["label_status"] = "draft"
+    ds_path = tmp_path / "d.json"
+    ds_path.write_text(json.dumps(data, ensure_ascii=False))
+    monkeypatch.setattr(sys, "argv", ["run.py", "fixed", "--dataset", str(ds_path), "--out", str(tmp_path / "run")])
+    ev.main()
+
+    manifest = json.loads((tmp_path / "run/manifest.json").read_text())
+    assert manifest["label_status"]["draft"] == len(data["items"])
+    assert "라벨 초안" in (tmp_path / "run/summary.md").read_text()
