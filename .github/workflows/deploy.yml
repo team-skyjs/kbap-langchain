@@ -19,6 +19,9 @@ on:
 concurrency:
   group: deploy # push·dispatch 공유 — 동시 배포 방지
   cancel-in-progress: false # 배포 중단은 반쪽 push를 남길 수 있어 순차 실행
+  # 기본(queue: single)은 대기 중인 실행을 새 실행이 취소한다 — dev 수동 배포가 대기 중인
+  # main 푸시(prod) 배포를 지우면 prod 가 옛 커밋에 남는다. 대기 실행을 순서대로 쌓는다.
+  queue: max
 
 jobs:
   deploy:
