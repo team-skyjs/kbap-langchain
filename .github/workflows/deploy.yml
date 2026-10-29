@@ -1,16 +1,28 @@
 # main 머지 시 Lambda 배포 — 로직은 deploy.sh 하나가 소유하고 여기서는 러너 준비만 한다.
+# 수동 실행(workflow_dispatch)은 dev 함수 전용이다 — 기능 브랜치를 prod 에 내보내지 않고 dev 에서 확인할 때(KB-913).
+#   gh workflow run deploy.yml --ref <브랜치> -f target=dev
+# GitHub 은 기본 브랜치(main)의 이 파일에 workflow_dispatch 가 있어야 수동 실행을 허용한다.
 name: deploy
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 배포 대상 — dev 만 허용(prod 는 main 푸시 경로)
+        type: choice
+        options: [dev]
+        default: dev
+        required: true
 
 concurrency:
-  group: deploy
+  group: deploy # push·dispatch 공유 — 동시 배포 방지
   cancel-in-progress: false # 배포 중단은 반쪽 push를 남길 수 있어 순차 실행
 
 jobs:
   deploy:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,3 +41,31 @@ jobs:
           aws-region: ap-northeast-2
 
       - run: ./deploy.sh
+
+  deploy-dev:
+    # choice 가 dev 하나뿐이지만 API 로 다른 값을 보내는 경우까지 여기서 한 번 더 막는다.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      # deploy.sh 도 workflow_dispatch 에서 --dev-only 가 아니면 거부한다(이중 가드).
+      - run: ./deploy.sh --dev-only
+
+      # 어떤 커밋이 dev 에 올라갔는지 — 이미지 태그 = 커밋 SHA 12자리이고 Lambda ImageUri 에 그대로 남는다.
+      - name: summary
+        env:
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "dev 배포: kbap-generate-content <- kbap/langchain:${SHA:0:12} (브랜치 $REF)" >> "$GITHUB_STEP_SUMMARY"
