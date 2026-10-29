@@ -186,7 +186,12 @@ jobs:
           resp=("$RUNNER_TEMP"/resp/*.json)
           if [ ${#resp[@]} -eq 0 ]; then echo "성공한 조각 없음"; exit 1; fi
           # 요약(지표표)만 잡 요약에 싣는다 — 행·불일치 목록은 artifact 로만.
-          uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" > /dev/null
+          # stderr 도 로그에 내보내지 않는다 — 예외 메시지(검증 오류 등)에 데이터셋 값이 실릴 수 있다. 실패하면 예외 유형만.
+          if ! uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" \
+               > /dev/null 2> "$RUNNER_TEMP/collect.err"; then
+            echo "::error::collect 실패: $(grep -oE '^[A-Za-z_.]+(Error|Exception)\b' "$RUNNER_TEMP/collect.err" | tail -1 || echo 알 수 없음)"
+            exit 1
+          fi
           cat "evals/decision/runs/$run_id/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       # ④ 업로드 전 유출 검사 — 함수 환경변수 값(8자 이상)이 결과에 섞였으면 업로드하지 않는다.
