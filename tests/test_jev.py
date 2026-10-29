@@ -339,3 +339,28 @@ async def test_jev_engine_payload_has_no_jev_fields():
     payload = build_ingest_payload(state, 1, 1)
     assert set(payload) == PAYLOAD_KEYS
     assert "jev" not in json.dumps(payload, ensure_ascii=False)
+
+
+async def test_retry_after_beyond_budget_is_not_retried_early():
+    # 서버가 30초 뒤를 요구하면 4초 만에 마지막 시도를 버리지 않는다 — 바로 일시 실패(SQS 재시도)로.
+    slept = []
+
+    async def sleep(s):
+        slept.append(s)
+
+    fake = FakeJev(ing=[(429, {"retry-after": "30"})])
+    llm = build_fns(defaultdict(list))
+    reviews = JevReviews(JevSettings(api_key="test-key"), llm, transport=httpx.MockTransport(fake.handler), sleep=sleep)
+
+    with pytest.raises(JevTransientError):
+        await reviews.review_ingredients("김치찌개", {"substances": [], "spiciness": 3})
+    assert fake.requests["ing"] == 1 and slept == [] and reviews.requests == 1
+
+
+async def test_request_count_includes_retries():
+    fake = FakeJev(name=[(503, {})])
+    llm = build_fns(defaultdict(list))
+    reviews = JevReviews(JevSettings(api_key="test-key"), llm, transport=httpx.MockTransport(fake.handler), sleep=no_sleep)
+    r = await reviews.review_name("김치찌게", "김치찌개")
+
+    assert reviews.requests == 2 and r._trace["requests"] == 2

@@ -70,3 +70,31 @@ def test_fixed_metrics_count_denominators_and_failures(ev):
     # 실패한 요청도 안전 세트 분모에 남는다 — 통과로도 빠지지도 않는다.
     assert m["A"]["중요 성분 누락 오통과"] == "0/1 (0.0%)"
     assert m["B"]["대체 호출률"] == "1/1 (100.0%)"
+
+
+async def test_pipeline_counts_jev_requests_even_when_graph_fails(ev):
+    # 재시도 요청과 실패한 그래프의 요청도 집계에 남아야 한다 — 장애·한도 상황 비교가 목적이다.
+    import httpx
+
+    from kbap import jev
+
+    def handler(request):
+        return httpx.Response(429, json={"detail": "slow down"})
+
+    a = ev.mock_llm_fns()
+
+    async def no_sleep(_):
+        return None
+
+    def new_b():
+        reviews = jev.JevReviews(jev.JevSettings(api_key="k"), a, transport=httpx.MockTransport(handler), sleep=no_sleep)
+        return jev.with_jev_reviews(a, reviews), reviews
+
+    ds = ev.Dataset.model_validate(
+        {"dataset_version": "t", "items": [{"id": "x", "group": "g", "split": "tune", "source": "synthetic", "scanned_name": "김치찌개"}]}
+    )
+    rows = await ev.run_pipeline(ds, {"A": lambda: (a, None), "B": new_b}, concurrency=1)
+    b = next(r for r in rows if r["engine"] == "B")
+
+    assert "error" in b and b["jev_requests"] == 2  # 이름 검수 1회 + 429 재시도 1회
+    assert ev.pipeline_metrics(rows)["B"]["Jev 요청 수(재시도 포함)"] == "2"

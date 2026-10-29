@@ -270,11 +270,11 @@ def decide_ingredients(answers: dict, policy: JevPolicy) -> tuple[str, list[str]
 _NO_RETRY = {400, 401, 403, 404, 413, 415, 422}
 
 
-def _retry_after(resp: httpx.Response, fallback: float) -> float:
+def _retry_after(resp: httpx.Response) -> float | None:
     try:
-        return float(resp.headers.get("retry-after", fallback))
-    except ValueError:
-        return fallback
+        return float(resp.headers["retry-after"])
+    except (KeyError, ValueError):
+        return None
 
 
 async def ask(
@@ -283,6 +283,7 @@ async def ask(
     questions: dict,
     transport: httpx.AsyncBaseTransport | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    on_attempt: Callable[[], None] = lambda: None,
 ) -> dict:
     """System One 요청 1건. 재시도 예산을 다 쓰면 원인별 예외를 던진다.
 
@@ -299,6 +300,7 @@ async def ask(
         if attempt:
             await sleep(wait)
         wait = min(settings.backoff_seconds * 2**attempt, settings.max_backoff_seconds)
+        on_attempt()
         try:
             async with httpx.AsyncClient(timeout=settings.timeout_seconds, transport=transport) as client:
                 resp = await client.post(JEV_URL, json=body, headers=headers)
@@ -321,7 +323,12 @@ async def ask(
             raise JevRequestError(f"Jev {resp.status_code}: {resp.text[:300]}")
         transient = resp.status_code == 429
         last = httpx.HTTPStatusError(f"Jev {resp.status_code}", request=resp.request, response=resp)
-        wait = min(_retry_after(resp, wait), settings.max_backoff_seconds)
+        server_wait = _retry_after(resp)
+        if server_wait is not None:
+            if server_wait > settings.max_backoff_seconds:
+                # 서버가 허용한 시점보다 일찍 재시도해 마지막 시도를 버리지 않는다 — 예산 밖이면 바로 넘긴다.
+                break
+            wait = server_wait
     if transient:
         raise JevTransientError(f"Jev timeout/429 재시도 소진: {last}") from last
     raise JevOutageError(f"Jev 장애 재시도 소진: {last}") from last
@@ -336,6 +343,10 @@ class JevReviews:
     def __init__(self, settings: JevSettings, llm, policy: JevPolicy = JevPolicy(), transport=None, sleep=asyncio.sleep):
         self.settings, self.llm, self.policy = settings, llm, policy
         self._transport, self._sleep = transport, sleep
+        self.requests = 0  # 재시도 포함 실제 HTTP 요청 수 — 평가 집계용
+
+    def _count(self):
+        self.requests += 1
 
     async def _ask(self, node: str, state: dict, questions: dict):
         """(응답 or None, trace). 장애면 응답 None — 호출자가 LLM 으로 대체한다."""
@@ -348,14 +359,16 @@ class JevReviews:
             "question_hash": question_hash(questions),
             "requested_model": self.settings.model,
         }
+        before = self.requests
         try:
-            data = await ask(self.settings, state, questions, self._transport, self._sleep)
+            data = await ask(self.settings, state, questions, self._transport, self._sleep, self._count)
         except JevOutageError as e:
             # 장애는 판단 보류가 아니다 — outcome 을 비워 보류율에 섞지 않는다(대체 호출률에는 잡힌다).
             trace.update(outcome=None, fallback="outage", error=str(e)[:300])
             return None, trace
         finally:
             trace["latency_ms"] = round((time.monotonic() - started) * 1000)
+            trace["requests"] = self.requests - before
         trace.update(model=data["model"], usage=data.get("usage"), answers=data["answers"])
         return data["answers"], trace
 

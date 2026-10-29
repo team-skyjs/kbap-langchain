@@ -189,8 +189,11 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def build_engines(live: bool, raw: dict) -> tuple[ContentFns, ContentFns, dict]:
-    """(A fns, B fns, 실행 설정 기록). B 의 LLM 대체는 A 의 검수 함수와 같은 것을 쓴다(실제 출시 구성)."""
+def build_engines(live: bool, raw: dict) -> tuple[dict, dict]:
+    """({"A"|"B": 엔진 팩토리}, 실행 설정 기록). B 의 LLM 대체는 A 의 검수 함수와 같은 것을 쓴다(실제 출시 구성).
+
+    팩토리는 (fns, JevReviews|None) 를 돌려준다. 평가 행마다 새로 만들어 Jev 요청 수(재시도 포함)를
+    그 행에 귀속시킨다 — 그래프가 실패해도 요청 수는 남는다."""
     jev_cfg = dict(raw.get("jev") or {})
     policy = jev.JevPolicy(**jev_cfg.pop("policy", {}))
     if live:
@@ -205,9 +208,12 @@ def build_engines(live: bool, raw: dict) -> tuple[ContentFns, ContentFns, dict]:
         a = mock_llm_fns()
         settings = jev.JevSettings(api_key="mock", **jev_cfg)
         transport = mock_jev_transport()
-    b = jev.with_jev_reviews(a, jev.JevReviews(settings, a, policy, transport=transport))
+    def new_b():
+        reviews = jev.JevReviews(settings, a, policy, transport=transport)
+        return jev.with_jev_reviews(a, reviews), reviews
+
     settings_record = {k: v for k, v in vars(settings).items() if k != "api_key"}
-    return a, b, {"jev_settings": settings_record, "jev_policy": vars(policy), "llm": raw["llm"]}
+    return {"A": lambda: (a, None), "B": new_b}, {"jev_settings": settings_record, "jev_policy": vars(policy), "llm": raw["llm"]}
 
 
 def run_manifest(args, ds: Dataset, engine_record: dict) -> dict:
@@ -287,19 +293,21 @@ async def _review(fns: ContentFns, node: str, item: Item):
 _INPUT = {"review_name": "name_review", "review_description": "description", "review_ingredients": "ingredients"}
 
 
-async def run_fixed(ds: Dataset, engines: dict[str, ContentFns], concurrency: int) -> list[dict]:
+async def run_fixed(ds: Dataset, engines: dict, concurrency: int) -> list[dict]:
     sem = asyncio.Semaphore(concurrency)
 
     async def one(item: Item, node: str, engine: str) -> dict:
         row = {"item": item.id, "group": item.group, "split": item.split, "source": item.source, "node": node, "engine": engine}
+        fns, reviews = engines[engine]()
         async with sem:
             started = time.monotonic()
             try:
-                r = await _review(engines[engine], node, item)
+                r = await _review(fns, node, item)
                 row.update(decision=_decision(node, r), reason=r.reason, trace=r._trace)
             except Exception as e:  # 실패는 통계에서 빼지 않는다 — 실패율 분자다
                 row.update(error=f"{type(e).__name__}: {e}"[:300])
             row["latency_ms"] = round((time.monotonic() - started) * 1000)
+        row["jev_requests"] = reviews.requests if reviews else 0
         return row
 
     jobs = []
@@ -322,13 +330,14 @@ def counting(fns: ContentFns, counts: dict) -> ContentFns:
     return ContentFns(*(wrap(n, f) for n, f in zip(ContentFns._fields, fns)))
 
 
-async def run_pipeline(ds: Dataset, engines: dict[str, ContentFns], concurrency: int) -> list[dict]:
+async def run_pipeline(ds: Dataset, engines: dict, concurrency: int) -> list[dict]:
     names = list(dict.fromkeys(i.scanned_name for i in ds.items if i.scanned_name))
     sem = asyncio.Semaphore(concurrency)
 
     async def one(idx: int, name: str, engine: str) -> dict:
         counts: dict = defaultdict(int)
-        graph = build_content_graph(counting(engines[engine], counts))
+        fns, reviews = engines[engine]()
+        graph = build_content_graph(counting(fns, counts))
         row = {"scanned_name": name, "engine": engine, "order": idx % 2}
         async with sem:
             started = time.monotonic()
@@ -349,6 +358,7 @@ async def run_pipeline(ds: Dataset, engines: dict[str, ContentFns], concurrency:
                 row["error"] = f"{type(e).__name__}: {e}"[:300]
             row["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         row["calls"] = dict(counts)
+        row["jev_requests"] = reviews.requests if reviews else 0  # 재시도·실패 그래프 포함
         return row
 
     started = time.monotonic()
@@ -410,6 +420,7 @@ def fixed_metrics(rows: list[dict], labels: dict[str, Labels]) -> dict[str, dict
         out[engine] = {k: _rate(*v) for k, v in c.items()} | {
             "검수 지연 p50/p95 ms": f"{_p(lat, .5)} / {_p(lat, .95)} (n={len(lat)})",
             "Jev 입력 토큰 합": str(tokens),
+            "Jev 요청 수(재시도 포함)": str(sum(r.get("jev_requests", 0) for r in er)),
         }
     return out
 
@@ -462,7 +473,7 @@ def pipeline_metrics(rows: list[dict]) -> dict[str, dict[str, str]]:
             "1건 완료 p50/p95 ms": f"{_p(el, .5)} / {_p(el, .95)} (n={len(el)})",
             "건당 LLM 호출 평균": f"{statistics.mean(calls):.2f}" if calls else "–",
             "설명 재생성률": _rate(regen, len(ok)),
-            "Jev 요청 수": str(sum(len([t for t in r.get("traces", []) if t.get("engine") == "jev"]) for r in er)),
+            "Jev 요청 수(재시도 포함)": str(sum(r.get("jev_requests", 0) for r in er)),
             "대체 호출 수": str(sum(len([t for t in r.get("traces", []) if t.get("fallback")]) for r in er)),
         }
     return out
@@ -535,13 +546,13 @@ def main() -> None:
     if args.live:
         fields = sorted({f for i in ds.items for f in ("scanned_name", "name_review", "description", "ingredients") if getattr(i, f)})
         print(f"[live] {len(ds.items)}건의 {fields} 필드를 LLM 제공자와 TypeSafe 로 전송한다.", file=sys.stderr)
-    a, b, record = build_engines(args.live, raw)
+    engines, record = build_engines(args.live, raw)
     out.mkdir(parents=True, exist_ok=True)
     manifest = run_manifest(args, ds, record) | {"dataset_path": str(Path(args.dataset).resolve())}
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
 
     runner = run_fixed if args.command == "fixed" else run_pipeline
-    rows = asyncio.run(runner(ds, {"A": a, "B": b}, args.concurrency))
+    rows = asyncio.run(runner(ds, engines, args.concurrency))
     name = "results.jsonl" if args.command == "fixed" else "pipeline.jsonl"
     with open(out / name, "w") as f:
         for r in rows:
