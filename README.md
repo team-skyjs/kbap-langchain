@@ -124,6 +124,8 @@ SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 R
 
 ## 운영 메모
 
+- **기능 브랜치를 dev 에서만 확인할 때는 `./deploy.sh --dev-only`.** dev 함수(`kbap-generate-content`)만 갱신하고 prod 함수와 `:latest` 는 건드리지 않는다.
+
 - **dev Lambda 는 수동 발행 전용이다.** dev 서버에는 콘텐츠 배치(SQS 발행)가 0대라 dev 큐에 메시지가
   자동으로 들어오지 않는다 — 검증할 때만 메시지 계약대로 직접 넣는다.
 - **`kbap review` 배치는 운영 승인 경로로 쓰지 않는다.** 콘텐츠 승인은 관리자 사람 검수로 유지하며,

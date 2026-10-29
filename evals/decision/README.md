@@ -22,6 +22,8 @@ uv run python evals/decision/run.py summarize --out evals/decision/runs/<id>
 
 ## 데이터셋 (`Dataset` 스키마, `run.py`)
 
+선정 기준·변형·라벨 정의는 [DATASET.md](DATASET.md), 기계용 스키마는 `dataset.schema.json`(`run.py schema`).
+
 - `split`: `tune`(질문·임계값 조정) / `final`(고정 평가). **같은 `group`(같은 음식의 정상·오류 변형)이 두 split에 나뉘면 로드가 실패한다.**
 - `source`: `real` / `synthetic` — 지표를 따로 집계한다. 섞은 평균을 운영 정확도로 읽지 않는다.
 - `name_review` / `description` / `ingredients`: fixed 의 검수 입력(저장된 생성물). `scanned_name`: pipeline 입력.

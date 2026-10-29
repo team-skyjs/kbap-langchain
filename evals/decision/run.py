@@ -527,13 +527,18 @@ def summarize(out: Path) -> str:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["fixed", "pipeline", "summarize"])
+    p.add_argument("command", choices=["fixed", "pipeline", "summarize", "schema"])
     p.add_argument("--dataset")
-    p.add_argument("--out", required=True)
+    p.add_argument("--out")
     p.add_argument("--split", choices=["tune", "final"])
     p.add_argument("--live", action="store_true", help="실제 LLM·Jev 유료 호출. 없으면 모의 응답")
     p.add_argument("--concurrency", type=int, default=2)
     args = p.parse_args()
+    if args.command == "schema":
+        print(json.dumps(Dataset.model_json_schema(), ensure_ascii=False, indent=2))
+        return
+    if not args.out:
+        p.error("--out 필요")
     out = Path(args.out)
 
     if args.command == "summarize":

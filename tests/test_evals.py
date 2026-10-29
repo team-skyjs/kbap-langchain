@@ -98,3 +98,9 @@ async def test_pipeline_counts_jev_requests_even_when_graph_fails(ev):
 
     assert "error" in b and b["jev_requests"] == 2  # 이름 검수 1회 + 429 재시도 1회
     assert ev.pipeline_metrics(rows)["B"]["Jev 요청 수(재시도 포함)"] == "2"
+
+
+def test_checked_in_schema_matches_model(ev):
+    # 라벨링 쪽이 쓰는 dataset.schema.json 이 Dataset 모델과 어긋나지 않게 — 다르면 `run.py schema` 로 다시 만든다.
+    checked_in = json.loads((ROOT / "evals/decision/dataset.schema.json").read_text())
+    assert checked_in == ev.Dataset.model_json_schema()
