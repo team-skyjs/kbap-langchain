@@ -47,7 +47,7 @@ aws ecr get-login-password --region "$REGION" |
   docker login --username AWS --password-stdin "$REGISTRY"
 
 # provenance 매니페스트가 붙으면 Lambda가 이미지를 거부한다(단일 매니페스트만 허용)
-docker build --platform linux/arm64 --provenance=false -t "$IMAGE" -t "$LATEST" .
+docker build --platform linux/arm64 --provenance=false --build-arg KBAP_IMAGE_TAG="$TAG" -t "$IMAGE" -t "$LATEST" .
 docker push "$IMAGE"
 # dev-only 는 기능 브랜치 이미지일 수 있어 이동 포인터(latest)를 옮기지 않는다.
 $DEV_ONLY || docker push "$LATEST"

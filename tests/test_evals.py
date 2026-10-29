@@ -104,3 +104,82 @@ def test_checked_in_schema_matches_model(ev):
     # 라벨링 쪽이 쓰는 dataset.schema.json 이 Dataset 모델과 어긋나지 않게 — 다르면 `run.py schema` 로 다시 만든다.
     checked_in = json.loads((ROOT / "evals/decision/dataset.schema.json").read_text())
     assert checked_in == ev.Dataset.model_json_schema()
+
+
+# ===== Lambda 평가 모드 (content.handler → kbap.evaluate.lambda_eval) =====
+
+
+def eval_event(mode="fixed", engine="both", **extra):
+    return {"eval": {"mode": mode, "engine": engine, "live": False, "dataset": json.loads(SAMPLE.read_text()), **extra}}
+
+
+def test_eval_event_ignored_without_flag(monkeypatch):
+    # prod 에는 KBAP_EVAL_ENABLED 가 없다 — 평가 이벤트는 그래프도 키도 건드리지 않고 무시된다.
+    from kbap import content
+
+    monkeypatch.delenv("KBAP_EVAL_ENABLED", raising=False)
+    monkeypatch.setattr(content, "_cached_graph", lambda: pytest.fail("SQS 경로로 가면 안 된다"))
+    assert content.handler(eval_event(), None) == {"eval": "disabled"}
+
+
+@pytest.mark.parametrize("engine, expected", [("both", {"A", "B"}), ("A", {"A"}), ("B", {"B"})])
+def test_eval_event_runs_requested_engines_without_ingest(monkeypatch, engine, expected):
+    from kbap import content
+
+    monkeypatch.setenv("KBAP_EVAL_ENABLED", "true")
+    monkeypatch.setenv("KBAP_IMAGE_TAG", "abc123def456")
+    monkeypatch.setenv("REVIEW_ENGINE", "llm")  # 평가 모드는 REVIEW_ENGINE 과 무관하게 A·B 를 직접 조립한다
+    monkeypatch.setattr(content, "_cached_graph", lambda: pytest.fail("평가 모드는 운영 그래프·적재를 쓰지 않는다"))
+
+    result = content.handler(eval_event(engine=engine), None)
+
+    assert {r["engine"] for r in result["rows"]} == expected
+    assert result["manifest"]["image_tag"] == "abc123def456"
+    assert result["manifest"]["engines"] == sorted(expected)
+    assert "검수 A/B" in result["summary"]
+    json.dumps(result)  # 그대로 직렬화돼야 invoke 응답이 된다
+
+
+def test_eval_event_with_records_is_treated_as_sqs(monkeypatch):
+    # Records 가 있으면 실제 SQS 배치다 — eval 키가 섞여 있어도 평가로 새지 않는다.
+    from kbap import content, evaluate
+
+    monkeypatch.setenv("KBAP_EVAL_ENABLED", "true")
+    monkeypatch.setattr(evaluate, "lambda_eval", lambda spec: pytest.fail("평가로 가면 안 된다"))
+    monkeypatch.setattr(content, "_cached_graph", lambda: object())
+
+    async def fake_consume(event, graph, concurrency, callbacks):
+        return []
+
+    monkeypatch.setattr(content, "_consume", fake_consume)
+    monkeypatch.setattr(content, "make_callbacks", lambda: [])
+    import langfuse
+
+    monkeypatch.setattr(langfuse, "get_client", lambda: type("C", (), {"flush": lambda self: None})())
+    assert content.handler({"Records": [], "eval": {}}, None) == {"batchItemFailures": []}
+
+
+def test_oversized_eval_result_moves_rows_to_logs(monkeypatch, capsys):
+    from kbap import content, evaluate
+
+    monkeypatch.setenv("KBAP_EVAL_ENABLED", "true")
+    monkeypatch.setattr(evaluate, "MAX_RESPONSE_BYTES", 100)
+    result = content.handler(eval_event(), None)
+
+    assert result["rows"] is None and result["rows_in_logs"] > 0
+    logged = [line for line in capsys.readouterr().out.splitlines() if line.startswith("EVAL_ROW ")]
+    assert len(logged) == result["rows_in_logs"]
+
+
+def test_collect_turns_lambda_responses_into_run_files(ev, monkeypatch, tmp_path):
+    from kbap import content
+
+    monkeypatch.setenv("KBAP_EVAL_ENABLED", "true")
+    resp = tmp_path / "resp.json"
+    resp.write_text(json.dumps(content.handler(eval_event(), None), ensure_ascii=False))
+
+    out = tmp_path / "run"
+    text = ev.collect(str(SAMPLE), out, [str(resp)])
+
+    assert (out / "results.jsonl").exists() and (out / "manifest.json").exists()
+    assert "고정 입력 검수" in text

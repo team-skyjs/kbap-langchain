@@ -700,6 +700,12 @@ async def _consume(event, graph, concurrency: int, callbacks: list) -> list[str]
 
 
 def handler(event, context):
+    # 평가 이벤트는 Records 없이 최상위 eval 키 — SQS 메시지와 섞이지 않는다(KB-913).
+    # KBAP_EVAL_ENABLED=true 인 함수(dev)에서만 돌고, 적재·SQS 응답이 없다.
+    if "eval" in event and "Records" not in event:
+        from kbap.evaluate import lambda_eval
+
+        return lambda_eval(event["eval"])
     graph = _cached_graph()
     concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
     failed = asyncio.run(_consume(event, graph, concurrency, make_callbacks()))
