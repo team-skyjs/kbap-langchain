@@ -33,8 +33,13 @@ on:
         type: choice
         options: ["false", "true"]
         default: "false"
+      dataset_source:
+        description: repo = 이 레포의 dataset_path / spec = private kbap-spec 의 평가 데이터셋(real 데이터는 공개 레포에 두지 않는다)
+        type: choice
+        options: [repo, spec]
+        default: repo
       dataset_path:
-        description: 레포 안 데이터셋 경로
+        description: dataset_source=repo 일 때 레포 안 데이터셋 경로
         default: evals/decision/data/dataset.json
 
 concurrency:
@@ -45,6 +50,7 @@ concurrency:
 env:
   FUNCTION: kbap-generate-content # dev 전용, 하드코딩
   AWS_REGION: ap-northeast-2
+  SPEC_DATASET: reports/jev-decision-2026-10-30/dataset-manifest.json
 
 jobs:
   eval:
@@ -52,6 +58,38 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+
+      # dataset_source=spec — 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 그래서
+      # ① private kbap-spec 에서 데이터셋을 읽고 ② 결과는 암호화해서만 올린다. 시크릿이 없으면
+      # 유료 호출 전에 중단한다(SPEC_READ_TOKEN: kbap-spec contents:read, EVAL_RESULT_PASSPHRASE: 결과 암호).
+      - name: check spec secrets
+        if: inputs.dataset_source == 'spec'
+        env:
+          HAS_TOKEN: ${{ secrets.SPEC_READ_TOKEN != '' }}
+          HAS_PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE != '' }}
+        run: |
+          [ "$HAS_TOKEN" = true ] || { echo "::error::SPEC_READ_TOKEN 시크릿 없음 — kbap-spec contents:read fine-grained 토큰을 추가한다"; exit 1; }
+          [ "$HAS_PASS" = true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — public 레포 artifact 를 평문으로 올리지 않는다"; exit 1; }
+      - uses: actions/checkout@v4
+        if: inputs.dataset_source == 'spec'
+        with:
+          repository: team-skyjs/kbap-spec
+          ref: main
+          token: ${{ secrets.SPEC_READ_TOKEN }}
+          path: _spec
+          sparse-checkout: ${{ env.SPEC_DATASET }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: resolve dataset
+        env:
+          SOURCE: ${{ inputs.dataset_source }}
+          REPO_PATH: ${{ inputs.dataset_path }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" = spec ]; then f="_spec/$SPEC_DATASET"; else f="$REPO_PATH"; fi
+          [ -f "$f" ] || { echo "::error::데이터셋 없음: $f"; exit 1; }
+          echo "DATASET=$f" >> "$GITHUB_ENV"
+          echo "데이터셋: $f ($(jq '.items | length' "$f")건, $(jq -r .dataset_version "$f"))"
 
       # 서드파티 액션은 커밋 SHA 고정. uv 설치·의존성 동기화는 AWS 자격증명이 환경에 들어오기 전에 끝낸다.
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
@@ -97,13 +135,11 @@ jobs:
           SPLIT: ${{ inputs.split }}
           CHUNK: ${{ inputs.chunk_size }}
           LIVE: ${{ inputs.live }}
-          DATASET: ${{ inputs.dataset_path }}
         run: |
           set -euo pipefail
           size="${CHUNK:-}"
           [ -n "$size" ] || size=$([ "$MODE" = fixed ] && echo 20 || echo 5)
           [[ "$size" =~ ^[1-9][0-9]*$ ]] || { echo "chunk_size 는 양의 정수: $size" >&2; exit 1; }
-          [ -f "$DATASET" ] || { echo "데이터셋 없음: $DATASET" >&2; exit 1; }
           split_json=$([ "$SPLIT" = all ] && echo null || echo "\"$SPLIT\"")
           sel='[.items[] | select($split == null or .split == $split)'
           sel+=$([ "$MODE" = pipeline ] && echo ' | select(.scanned_name != null)]' || echo ']')
@@ -127,7 +163,8 @@ jobs:
                && jq -e '.manifest and (.rows != null)' "$out" > /dev/null; then
               echo "조각 $i 완료"
             else
-              echo "조각 $i 실패(시작 $start): $(head -c 300 "$out" 2>/dev/null || true)"
+              # 본문은 출력하지 않는다(데이터셋 텍스트가 섞일 수 있고 public 레포 로그는 공개된다).
+              echo "조각 $i 실패(시작 $start): $(jq -r '.errorType // (if .eval then "eval=\(.eval)" else "결과 없음" end)' "$out" 2>/dev/null || echo 응답 없음)"
               echo "$i start=$start" >> "$RUNNER_TEMP/failed.txt"
               rm -f "$out"
             fi
@@ -137,7 +174,6 @@ jobs:
       # ③ 지표표·불일치 CSV·manifest
       - name: collect
         env:
-          DATASET: ${{ inputs.dataset_path }}
           NOTE: ${{ inputs.ref_note }}
         run: |
           set -euo pipefail
@@ -149,8 +185,9 @@ jobs:
           shopt -s nullglob
           resp=("$RUNNER_TEMP"/resp/*.json)
           if [ ${#resp[@]} -eq 0 ]; then echo "성공한 조각 없음"; exit 1; fi
-          uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          # 요약(지표표)만 잡 요약에 싣는다 — 행·불일치 목록은 artifact 로만.
+          uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" > /dev/null
+          cat "evals/decision/runs/$run_id/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       # ④ 업로드 전 유출 검사 — 함수 환경변수 값(8자 이상)이 결과에 섞였으면 업로드하지 않는다.
       - name: leak check
@@ -163,6 +200,17 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/secrets.txt" "$RUNNER_TEMP/env.json"
           echo "유출 검사 통과"
+
+      # spec 데이터는 암호화해서만 올린다: gpg --decrypt <파일> | tar -xz
+      - name: encrypt results (spec)
+        if: inputs.dataset_source == 'spec'
+        env:
+          PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          tar -czf - -C "$RUN_DIR" . | gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase-fd 3 3<<<"$PASS" -o "$RUNNER_TEMP/results.tar.gz.gpg"
+          rm -rf "$RUN_DIR" && mkdir -p "$RUN_DIR" && mv "$RUNNER_TEMP/results.tar.gz.gpg" "$RUN_DIR/"
 
       - uses: actions/upload-artifact@v4
         with:
