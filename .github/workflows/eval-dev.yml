@@ -69,6 +69,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$FUNCTION" = kbap-generate-content
+          # 직전 dev 배포의 이미지 갱신이 끝나기 전엔 이전 코드로 호출되고 설정 갱신은 실패한다 — 먼저 기다린다.
+          aws lambda wait function-updated --function-name "$FUNCTION"
           env_json="$RUNNER_TEMP/env.json"
           aws lambda get-function-configuration --function-name "$FUNCTION" \
             --query 'Environment.Variables' --output json > "$env_json"
