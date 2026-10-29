@@ -42,6 +42,8 @@ IMAGE="$REGISTRY/$REPO:$TAG"
 LATEST="$REGISTRY/$REPO:latest"
 
 echo "대상 함수: ${FUNCTIONS[*]} (프로필 ${AWS_PROFILE:-env 자격증명}, 태그 $TAG)"
+# 어느 IAM 주체의 키로 도는지 — 권한 오류(예: ECR manifest HEAD 403) 원인을 바로 짚기 위해. ARN 은 비밀이 아니다.
+echo "AWS 주체: $(aws sts get-caller-identity --query Arn --output text)"
 
 aws ecr get-login-password --region "$REGION" |
   docker login --username AWS --password-stdin "$REGISTRY"
