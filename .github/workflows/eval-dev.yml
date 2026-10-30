@@ -33,14 +33,9 @@ on:
         type: choice
         options: ["false", "true"]
         default: "false"
-      dataset_source:
-        description: repo = 이 레포의 dataset_path / spec = private kbap-spec 의 평가 데이터셋(real 데이터는 공개 레포에 두지 않는다)
-        type: choice
-        options: [repo, spec]
-        default: repo
       dataset_path:
-        description: dataset_source=repo 일 때 레포 안 데이터셋 경로
-        default: evals/decision/data/dataset.json
+        description: 레포 안 데이터셋 경로
+        default: evals/decision/data/dataset-manifest.json
 
 concurrency:
   group: deploy # 배포 중인 함수를 평가하지 않게 deploy 와 같은 그룹 — 순서대로 대기
@@ -50,7 +45,6 @@ concurrency:
 env:
   FUNCTION: kbap-generate-content # dev 전용, 하드코딩
   AWS_REGION: ap-northeast-2
-  SPEC_DATASET: reports/jev-decision-2026-10-30/dataset-manifest.json
 
 jobs:
   eval:
@@ -59,34 +53,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # dataset_source=spec — 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 그래서
-      # ① private kbap-spec 에서 데이터셋을 읽고 ② 결과는 암호화해서만 올린다. 시크릿이 없으면
-      # 유료 호출 전에 중단한다(SPEC_READ_TOKEN: kbap-spec contents:read, EVAL_RESULT_PASSPHRASE: 결과 암호).
-      - name: check spec secrets
-        if: inputs.dataset_source == 'spec'
+      # 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 데이터셋은 레포에 공개해 두었지만
+      # 결과(모델 출력·판정 행)는 암호화해서만 올린다 — 암호가 없으면 유료 호출 전에 중단한다.
+      - name: check result passphrase
         env:
-          HAS_TOKEN: ${{ secrets.SPEC_READ_TOKEN != '' }}
           HAS_PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE != '' }}
         run: |
-          [ "$HAS_TOKEN" = true ] || { echo "::error::SPEC_READ_TOKEN 시크릿 없음 — kbap-spec contents:read fine-grained 토큰을 추가한다"; exit 1; }
           [ "$HAS_PASS" = true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — public 레포 artifact 를 평문으로 올리지 않는다"; exit 1; }
-      - uses: actions/checkout@v4
-        if: inputs.dataset_source == 'spec'
-        with:
-          repository: team-skyjs/kbap-spec
-          ref: main
-          token: ${{ secrets.SPEC_READ_TOKEN }}
-          path: _spec
-          sparse-checkout: ${{ env.SPEC_DATASET }}
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
       - name: resolve dataset
         env:
-          SOURCE: ${{ inputs.dataset_source }}
-          REPO_PATH: ${{ inputs.dataset_path }}
+          f: ${{ inputs.dataset_path }}
         run: |
           set -euo pipefail
-          if [ "$SOURCE" = spec ]; then f="_spec/$SPEC_DATASET"; else f="$REPO_PATH"; fi
           [ -f "$f" ] || { echo "::error::데이터셋 없음: $f"; exit 1; }
           echo "DATASET=$f" >> "$GITHUB_ENV"
           echo "데이터셋: $f ($(jq '.items | length' "$f")건, $(jq -r .dataset_version "$f"))"
@@ -206,9 +184,8 @@ jobs:
           rm -f "$RUNNER_TEMP/secrets.txt" "$RUNNER_TEMP/env.json"
           echo "유출 검사 통과"
 
-      # spec 데이터는 암호화해서만 올린다: gpg --decrypt <파일> | tar -xz
-      - name: encrypt results (spec)
-        if: inputs.dataset_source == 'spec'
+      # 결과는 암호화해서만 올린다: gpg --decrypt <파일> | tar -xz
+      - name: encrypt results
         env:
           PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE }}
         run: |
