@@ -10,20 +10,20 @@ kbap(Spring) 콘텐츠 배치의 LLM 로직을 이쪽으로 옮겨 없애는 것
 
 ```mermaid
 flowchart TD
-    A[스캔 이름 수신<br/>SQS batchSize 10] --> B[① 이름 정제<br/>자모 스냅 → LLM 교정 → 가드]
+    A[스캔 이름 수신<br/>SQS batchSize 10] --> B[① 이름 정제<br/>LLM 교정 → 가드]
     B --> B2[이름 검수]
     B2 -. 불통과 시 재정제<br/>총 3회 시도 .-> B
     B2 -- 비음식 --> X[즉시 거절 NOT_FOOD<br/>생성 콜 없이 종료]
     B2 --> C[② 이름 번역<br/>9개 언어]
     B2 --> D[③ 설명 생성]
-    B2 --> E[④ 기피성분·매운맛<br/>81종 후보]
+    B2 --> E[④ 기피성분·매운맛<br/>84종 후보]
     B2 --> L[⑤ 검색용 긴 설명<br/>벡터 DB 메타데이터]
     D --> D2[검수 1~3점]
     D2 -. 3점 미만 재생성 1회 .-> D
     D2 --> D3[설명 번역<br/>9개 언어]
     E --> E2[검수]
     E2 -. 불통과 시 재생성 1회 .-> E
-    C & D3 & E2 & L --> F[⑥ 종합 판정 LLM<br/>4분기 완료 후 defer 실행]
+    C & D3 & E2 & L --> F[⑥ 종합 판정 규칙<br/>4분기 완료 후 defer 실행]
     F --> G[PASS/FAIL + failureKind → kbap 적재 API<br/>관리자는 승인만]
 ```
 
@@ -33,10 +33,22 @@ flowchart TD
   설명 검수는 한국어 한 줄만 보고, 통과한 설명으로만 번역을 만든다.
 - **긴 설명은 판정에 참여하지 않는다.** 화면 미노출 검색 메타데이터라 검수·judge 를
   거치지 않고 join만 한다.
-- **기피성분은 fail-closed.** judge 가 통과시켜도 기피성분 검수 불통과면 코드가
-  `INGREDIENT_GUARD`로 뒤집는다 — 알레르기 데이터는 오통과가 누락보다 위험하다.
+- **종합 판정은 LLM 이 아니라 규칙이다.** 통과 = 설명 3점 AND 기피성분 검수 통과.
+  설명 미달은 `JUDGE_REJECTED`, 기피성분 불통과는 `INGREDIENT_GUARD`이며 둘 다 미달이면
+  `INGREDIENT_GUARD`가 이긴다 — 알레르기 데이터는 오통과가 누락보다 위험하다.
 - 재시도 후에도 실패한 분기는 사유를 그대로 안고 판정까지 흘러가 관리자가 열람한다.
   탈락 사유는 `failureKind`(NOT_FOOD / INGREDIENT_GUARD / JUDGE_REJECTED)로 구분된다.
+
+LLM 호출 수(음식 1건):
+
+| 경로 | 호출 |
+|---|---|
+| 기본(재시도 없음) — 정제·이름검수·이름번역·설명·설명검수·설명번역·기피성분·기피검수·긴설명 | **9** |
+| 설명 재생성 / 기피성분 재생성 1회당 | +2 |
+| 이름 재정제 1회당 (최대 2회) | +2 |
+| 비음식(NOT_FOOD) 조기 종료 | 2 |
+
+기본 9회는 `test_default_run_makes_exactly_nine_llm_calls`가 잠근다. structured output 파싱 실패 재시도(RetryPolicy)는 별도다.
 
 ## 구조
 
@@ -81,9 +93,16 @@ SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 R
 메시지 계약: `{"scannedName": <str>, "foodId": <int>, "outboxId": <int>}` — foodId·outboxId 는
 필수(양수)이며 적재 API 본문에 그대로 왕복된다. 위반 메시지는 그래프 실행 없이 DLQ 행.
 
+## 운영 메모
+
+- **dev Lambda 는 수동 발행 전용이다.** dev 서버에는 콘텐츠 배치(SQS 발행)가 0대라 dev 큐에 메시지가
+  자동으로 들어오지 않는다 — 검증할 때만 메시지 계약대로 직접 넣는다.
+- **`kbap review` 배치는 운영 승인 경로로 쓰지 않는다.** 콘텐츠 승인은 관리자 사람 검수로 유지하며,
+  이 배치는 이관 과도기의 실험·디버깅용으로만 남아 있다.
+
 ## 프롬프트 관리
 
-프롬프트 10개의 소스는 **Langfuse(production 라벨)** 다. UI에서 수정하고 라벨을 옮기면
+프롬프트 9개의 소스는 **Langfuse(production 라벨)** 다. UI에서 수정하고 라벨을 옮기면
 코드 배포 없이 반영되고, 라벨을 이전 버전으로 돌리면 롤백이다. 코드의 `*_TEMPLATE` 상수는
 최초 업로드 원본이자 Langfuse 접속 불가 시 폴백이며, `{{candidate_codes}}`·`{{langs}}` 등
 코드 계약이 걸린 값은 변수로 주입되므로 UI에서 편집하지 않는다.

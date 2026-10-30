@@ -1,4 +1,4 @@
-"""스캔 음식 이름 정제 — 자모 스냅·LLM 보수적 정규화·배치 실행.
+"""스캔 음식 이름 정제 — LLM 보수적 정규화·결정론적 가드·배치 실행.
 
 콘텐츠 파이프라인의 첫 단계다: 여기서 정제된 이름이 생성·검수 전체의 입력이 된다.
 kbap.content 그래프가 clean_one/make_normalizer 를 그대로 쓰며, 단독 배치
@@ -26,35 +26,6 @@ def _jamo(s: str) -> str:
     return unicodedata.normalize("NFD", s)
 
 
-def _jamo_edits(a: str, b: str) -> int:
-    """자모 삽입·삭제 횟수. 자모 치환 1회는 삭제 1회와 삽입 1회로 계산하므로 결과는 2다."""
-    matches = sum(bl.size for bl in difflib.SequenceMatcher(None, a, b).get_matching_blocks())
-    return len(a) + len(b) - 2 * matches
-
-
-def snap(name: str, anchors: list[str], max_edits: int = 2) -> str | None:
-    """자모 편집 횟수로 앵커(이미 수집해 확정한 음식명)에 스냅한다. 예산 초과·동률이면 None.
-
-    비율(ratio)이 아닌 절대 편집 횟수를 사용한다. 비율 기준은 공통 접두사가 길면
-    "왕김치찌개"→"김치찌개"(수식어 삭제), "돼지고기 김치찜"→"돼지고기 김치찌개"(다른 요리)
-    까지 통과시킨다. OCR 오타는 이름 길이와 무관하게 1~2자모 차이이므로 예산 2로 구분할 수 있다.
-    """
-    if name in anchors:
-        return name
-    # ponytail: difflib 선형 스캔 — 앵커 수가 수만 건을 넘으면 rapidfuzz로 교체
-    j = _jamo(name)
-    best, best_edits, tied = None, 0, False
-    for anchor in anchors:
-        edits = _jamo_edits(j, _jamo(anchor))
-        if edits > max_edits:
-            continue
-        if best is None or edits < best_edits:
-            best, best_edits, tied = anchor, edits, False
-        elif edits == best_edits:
-            tied = True  # 어느 앵커가 맞는지 알 수 없으며 앵커 순서에 따라 결과가 바뀌면 안 된다
-    return None if tied else best
-
-
 Normalizer = Callable[[str, str], Awaitable[NameFix]]
 
 _NON_HANGUL = re.compile(r"[^가-힣 ]")
@@ -75,11 +46,8 @@ def _plausible(corrected: str, original: str) -> bool:
 MAX_NAME_LENGTH = 20
 
 
-async def clean_one(name: str, anchors: list[str], normalize: Normalizer, feedback: str = "") -> dict:
+async def clean_one(name: str, normalize: Normalizer, feedback: str = "") -> dict:
     """feedback 은 이름 검수 탈락 사유 — 재정제 시 프롬프트에 들어가 개선을 유도한다."""
-    snapped = snap(name, anchors)
-    if snapped is not None:
-        return {"original": name, "name": snapped, "method": "snap", "reason": ""}
     fix = await normalize(name, feedback)
     corrected = fix.corrected.strip()
     if (
@@ -93,14 +61,12 @@ async def clean_one(name: str, anchors: list[str], normalize: Normalizer, feedba
     return {"original": name, "name": corrected, "method": "llm", "reason": fix.reason}
 
 
-async def clean_batch(
-    names: list[str], anchors: list[str], normalize: Normalizer, concurrency: int
-) -> list[dict]:
+async def clean_batch(names: list[str], normalize: Normalizer, concurrency: int) -> list[dict]:
     sem = asyncio.Semaphore(concurrency)
 
     async def one(name: str) -> dict:
         async with sem:
-            return await clean_one(name, anchors, normalize)
+            return await clean_one(name, normalize)
 
     results = await asyncio.gather(*(one(n) for n in names), return_exceptions=True)
     return [

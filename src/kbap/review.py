@@ -146,6 +146,7 @@ TARGET_LANGS = ["zh-Hans", "en", "ja", "zh-Hant", "vi", "id", "th", "ru", "es"]
 # 생성기(SpringAiFoodAvoidanceAssessmentClient)는 이 목록에서만 코드를 선택하므로 검수기도
 # 같은 목록을 알아야 "후보에 없어 넣지 못한 성분"을 누락으로 오인해 감점하지 않는다.
 # 카탈로그 API가 없어 하드코딩한다. enum이 바뀌면 여기도 갱신한다.
+# 묶음 코드(NUTS·CRUSTACEAN·MOLLUSK·MEAT)는 서버가 말단 코드의 함의로 처리하므로 넣지 않는다.
 AVOIDANCE_CODES = """EGG(계란) MILK(우유) DAIRY(유제품) GOAT_MILK(산양유) BUTTER(버터) GHEE(기버터)
 CHEESE(치즈) GELATIN(젤라틴) RENNET(레닛) HONEY(꿀) CARMINE(카민) PEANUT(땅콩) WALNUT(호두)
 PINE_NUT(잣) ALMOND(아몬드) CASHEW(캐슈넛) PISTACHIO(피스타치오) HAZELNUT(헤이즐넛)
@@ -155,10 +156,10 @@ OAT(귀리) CORN(옥수수) SOY(대두) LUPIN(루핀) PEA(완두콩) CHICKPEA(�
 SHRIMP(새우) SALTED_SHRIMP(새우젓) CRAB(게) CRAYFISH(가재) LOBSTER(랍스터) SQUID(오징어)
 OCTOPUS(문어) OYSTER(굴) OYSTER_SAUCE(굴소스) ABALONE(전복) MUSSEL(홍합) CLAM(조개)
 SHORT_NECK_CLAM(바지락) SCALLOP(가리비) SEAFOOD(해산물) FISH(생선) MACKEREL(고등어) SALMON(연어)
-TUNA(참치) COD(대구) ANCHOVY(멸치) FISH_SAUCE(액젓) BROTH(육수) DASHI(다시) BEEF(소고기)
-PORK(돼지고기) LARD(라드) TALLOW(우지) CHICKEN(닭고기) POULTRY(가금류) PEACH(복숭아)
+TUNA(참치) COD(대구) ANCHOVY(멸치) FISH_SAUCE(액젓) BROTH(육수) MEAT_BROTH(고기 육수) DASHI(다시) BEEF(소고기)
+PORK(돼지고기) LARD(라드) TALLOW(우지) CHICKEN(닭고기) POULTRY(가금류) LAMB(양고기) PEACH(복숭아)
 TOMATO(토마토) CELERY(셀러리) POTATO(감자) CARROT(당근) ONION(양파) GARLIC(마늘) SCALLION(파)
-CHIVE(부추) WILD_CHIVE(달래) ASAFOETIDA(흥거) ALCOHOL(알코올) MIRIN(미림) COOKING_WINE(맛술)
+CHIVE(부추) WILD_CHIVE(달래) CORIANDER(고수) ASAFOETIDA(흥거) ALCOHOL(알코올) MIRIN(미림) COOKING_WINE(맛술)
 SULFITES(아황산류)"""
 
 # 템플릿 본문은 kbap.prompts 에 모여 있다. 여기 함수들은 변수 조립만 담당한다.
