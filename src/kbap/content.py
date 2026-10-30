@@ -569,24 +569,39 @@ def load_graph(config_path: str | None = None):
     return build_content_graph(apply_review_engine(fns, raw))
 
 
+REVIEW_NODES = ("name", "description", "ingredients")
+
+
+def parse_review_engine(spec: str) -> dict[str, str]:
+    """`llm` | `jev`(3곳 모두) | `description=jev,name=llm` 처럼 노드별 — 적지 않은 노드는 llm."""
+    if spec in ("llm", "jev"):
+        return dict.fromkeys(REVIEW_NODES, spec)
+    out = dict.fromkeys(REVIEW_NODES, "llm")
+    for part in spec.split(","):
+        node, _, engine = part.strip().partition("=")
+        if node not in out or engine not in ("llm", "jev"):
+            raise ValueError(f"review_engine 은 llm|jev 또는 name|description|ingredients=llm|jev 목록: {spec!r}")
+        out[node] = engine
+    return out
+
+
 def apply_review_engine(fns: ContentFns, raw: dict, engine: str | None = None) -> ContentFns:
-    """검수 3곳의 엔진을 고른다(KB-913). 기본 llm — 생성 함수와 호출 수는 그대로다.
+    """검수 3곳의 엔진을 노드별로 고른다(KB-913). 기본 llm — 생성 함수와 호출 수는 그대로다.
 
     환경변수 REVIEW_ENGINE 이 config 의 review_engine 을 이긴다 — dev·prod 가 같은 이미지라
-    dev 함수에서만 jev 를 켤 수 있어야 한다. jev 인데 TYPESAFE_API_KEY 가 없으면 콜드 스타트에서 죽는다
-    (조용히 llm 으로 돌면 실험군이 섞인다).
+    함수마다 따로 켤 수 있어야 한다. jev 노드가 하나라도 있는데 TYPESAFE_API_KEY 가 없으면 콜드 스타트에서
+    죽는다(조용히 llm 으로 돌면 실험군이 섞인다). 기본값을 llm 으로 두는 이유도 같다 — prod 에는 키가 없다.
     """
-    engine = engine or os.environ.get("REVIEW_ENGINE") or raw.get("review_engine", "llm")
-    if engine == "llm":
+    engines = parse_review_engine(engine or os.environ.get("REVIEW_ENGINE") or raw.get("review_engine", "llm"))
+    jev_nodes = [n for n, e in engines.items() if e == "jev"]
+    if not jev_nodes:
         return fns
-    if engine != "jev":
-        raise ValueError(f"review_engine 은 llm|jev: {engine!r}")
     from kbap.jev import JevPolicy, JevReviews, JevSettings, with_jev_reviews
 
     jev = dict(raw.get("jev") or {})
     policy = JevPolicy(**jev.pop("policy", {}))
     settings = JevSettings(api_key=os.environ["TYPESAFE_API_KEY"], **jev)
-    return with_jev_reviews(fns, JevReviews(settings, fns, policy))
+    return with_jev_reviews(fns, JevReviews(settings, fns, policy), jev_nodes)
 
 
 _graph = None

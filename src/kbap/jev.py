@@ -438,10 +438,6 @@ class JevReviews:
         return result
 
 
-def with_jev_reviews(llm_fns, reviews: JevReviews):
-    """기존 LLM ContentFns 에서 검수 3곳만 Jev 로 바꾼다. 생성 함수는 그대로다."""
-    return llm_fns._replace(
-        review_name=reviews.review_name,
-        review_description=reviews.review_description,
-        review_ingredients=reviews.review_ingredients,
-    )
+def with_jev_reviews(llm_fns, reviews: JevReviews, nodes=("name", "description", "ingredients")):
+    """기존 LLM ContentFns 에서 고른 검수 노드만 Jev 로 바꾼다. 생성 함수와 나머지 검수는 그대로다."""
+    return llm_fns._replace(**{f"review_{n}": getattr(reviews, f"review_{n}") for n in nodes})

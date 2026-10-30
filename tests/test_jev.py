@@ -11,7 +11,7 @@ import json
 import httpx
 import pytest
 
-from kbap.content import apply_review_engine, build_content_graph, build_ingest_payload, process_event
+from kbap.content import apply_review_engine, build_content_graph, build_ingest_payload, parse_review_engine, process_event
 from kbap.jev import (
     DESC_QUESTIONS,
     FEEDBACK,
@@ -124,7 +124,7 @@ async def no_sleep(_):
     return None
 
 
-def jev_graph(fake: FakeJev, rec, **seqs):
+def jev_graph(fake: FakeJev, rec, nodes=("name", "description", "ingredients"), **seqs):
     llm = build_fns(rec, **seqs)
     # 대체 경로 호출을 세기 위해 LLM 검수 함수를 감싼다.
     async def counted_desc(name, desc, _f=llm.review_description):
@@ -143,7 +143,7 @@ def jev_graph(fake: FakeJev, rec, **seqs):
     reviews = JevReviews(
         JevSettings(api_key="test-key"), llm, transport=httpx.MockTransport(fake.handler), sleep=no_sleep
     )
-    return build_content_graph(with_jev_reviews(llm, reviews))
+    return build_content_graph(with_jev_reviews(llm, reviews, nodes))
 
 
 async def run_jev(fake, rec=None, **seqs):
@@ -308,6 +308,50 @@ def test_env_overrides_config_and_jev_requires_key(monkeypatch):
     assert jev_fns.review_name.__self__.settings.model == "jev-1.13.0"
     assert jev_fns.review_name.__self__.policy.food_min == 0.9
     assert jev_fns.generate_description is fns.generate_description  # 생성은 그대로
+
+
+@pytest.mark.parametrize("spec, expected", [
+    ("llm", {"name": "llm", "description": "llm", "ingredients": "llm"}),
+    ("jev", {"name": "jev", "description": "jev", "ingredients": "jev"}),
+    ("description=jev", {"name": "llm", "description": "jev", "ingredients": "llm"}),
+    ("description=jev, name=jev", {"name": "jev", "description": "jev", "ingredients": "llm"}),
+])
+def test_review_engine_spec_per_node(spec, expected):
+    assert parse_review_engine(spec) == expected
+
+
+@pytest.mark.parametrize("spec", ["gpt", "description=gpt", "desc=jev", "description"])
+def test_bad_review_engine_spec_rejected(spec):
+    with pytest.raises(ValueError):
+        parse_review_engine(spec)
+
+
+def test_description_only_keeps_llm_name_and_ingredient_reviews(monkeypatch):
+    # R-174: 설명만 Jev — 이름·기피성분 검수는 기존 LLM 함수 그대로(결과 무변).
+    monkeypatch.setenv("REVIEW_ENGINE", "description=jev")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    fns = build_fns(defaultdict(list))
+    mixed = apply_review_engine(fns, {})
+    assert mixed.review_description.__self__.settings.api_key == "k"
+    assert mixed.review_name is fns.review_name and mixed.review_ingredients is fns.review_ingredients
+
+
+async def test_mixed_engine_keeps_outage_fallback_and_failure_policy():
+    # 노드별로 섞여도 대체·실패 정책은 그대로 — 장애는 LLM 대체, 429 소진은 메시지 실패.
+    fake = FakeJev(desc=[(503, {}), (529, {})])
+    rec = defaultdict(list)
+    state = await jev_graph(fake, rec, nodes=("description",)).ainvoke({"food_name": "김치찌개"})
+    assert dict(fake.requests) == {"desc": 2}
+    assert rec["llm_review_description"] == ["김치찌개"]
+    assert len(rec["llm_review_name"]) == 1 and len(rec["llm_review_ingredients"]) == 1
+    assert [t["fallback"] for t in state["review_traces"]] == ["outage"]
+
+    fake = FakeJev(desc=[(429, {}), (429, {})])
+    kbap = FakeKbap()
+    failures = await process_event(
+        {"Records": [record("m1", 1, "김치찌개")]}, jev_graph(fake, defaultdict(list), nodes=("description",)), kbap, concurrency=1
+    )
+    assert failures == ["m1"] and kbap.posts == []
 
 
 def test_unknown_engine_rejected(monkeypatch):

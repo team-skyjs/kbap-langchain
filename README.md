@@ -56,9 +56,9 @@ LLM 호출 수(음식 1건):
 
 | 설정 | 값 |
 |---|---|
-| `config.yaml` `review_engine` | `llm`(기본·운영) \| `jev`(TypeSafe Jev) |
-| 환경변수 `REVIEW_ENGINE` | config 보다 우선 — dev·prod 가 같은 이미지라 dev 함수에서만 켤 때 쓴다 |
-| `TYPESAFE_API_KEY` | `jev` 일 때 필수, 없으면 콜드 스타트 실패. 코드·로그·결과 파일에 남기지 않는다 |
+| `config.yaml` `review_engine` | `llm`(기본·운영) \| `jev`(3곳 모두) \| 노드별 `description=jev`(쉼표 목록 `name\|description\|ingredients=llm\|jev`, 적지 않은 노드는 llm) |
+| 환경변수 `REVIEW_ENGINE` | config 보다 우선, 같은 형식 — dev·prod 가 같은 이미지라 함수마다 따로 켤 때 쓴다. R-174 결정값은 `description=jev` |
+| `TYPESAFE_API_KEY` | jev 노드가 하나라도 있으면 필수, 없으면 콜드 스타트 실패. 코드·로그·결과 파일에 남기지 않는다 |
 | `config.yaml` `jev.model` / `timeout_seconds` / `max_attempts` / `policy` | 모델 버전 고정(`jev-1.14.0`), 타임아웃·재시도, 확률 임계값(보정 전 기본값은 `kbap.jev.JevPolicy`) |
 
 Jev 판정은 PASS / REVISE / ABSTAIN 이다. 질문 문구·기준·임계값·피드백 문구는 전부 `src/kbap/jev.py` 한 곳에 있다.
@@ -73,7 +73,7 @@ Jev 판정은 PASS / REVISE / ABSTAIN 이다. 질문 문구·기준·임계값·
 
 Jev 예외는 그래프 RetryPolicy 대상이 아니라 Jev 재시도 × 그래프 재시도가 곱해지지 않는다.
 대체 여부·확률 원본·버전·사용량·지연은 그래프 상태 `review_traces` 에만 남고 적재 payload 에는 나가지 않는다.
-재시도 없는 정상 1건은 `jev` 일 때 LLM 6회 + Jev 3회다.
+재시도 없는 정상 1건은 `jev` 일 때 LLM 6회 + Jev 3회, `description=jev` 일 때 LLM 8회 + Jev 1회다.
 
 오프라인 A/B 평가는 [`evals/decision/`](evals/decision/README.md).
 
