@@ -201,3 +201,27 @@ def test_draft_labels_are_flagged_in_manifest_and_summary(ev, monkeypatch, tmp_p
     manifest = json.loads((tmp_path / "run/manifest.json").read_text())
     assert manifest["label_status"]["draft"] == len(data["items"])
     assert "라벨 초안" in (tmp_path / "run/summary.md").read_text()
+
+
+async def test_fixed_rows_record_llm_tokens_and_cost(ev):
+    # live 비용 집계·중단선의 근거 — LLM 토큰이 행마다 따로 잡혀야 한다(동시 실행 태스크끼리 섞이지 않게).
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    msg = AIMessage("x", usage_metadata={"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                    response_metadata={"model_name": "m"})
+    model = FakeMessagesListChatModel(responses=[msg] * 10)
+    a = ev.mock_llm_fns()
+
+    async def review_name(original, cleaned):
+        await model.ainvoke("q")
+        return await a.review_name(original, cleaned)
+
+    fns = a._replace(review_name=review_name)
+    ds = ev.Dataset.model_validate({"dataset_version": "t", "items": [
+        {"id": f"x{i}", "group": f"g{i}", "split": "tune", "source": "real",
+         "name_review": {"original": "김치찌개", "cleaned": "김치찌개"}} for i in range(3)]})
+    rows = await ev.run_fixed(ds, {"A": lambda: (fns, None)}, concurrency=3)
+
+    assert [r["llm_usage"] for r in rows] == [{"input_tokens": 1000, "output_tokens": 100}] * 3
+    assert ev.cost(rows)["usd"] == pytest.approx(3 * (1000 * 0.10 + 100 * 0.50) / 1e6)

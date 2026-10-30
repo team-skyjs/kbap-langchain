@@ -147,6 +147,18 @@
           ],
           "default": null,
           "title": "Label Status"
+        },
+        "needs_human": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Needs Human"
         }
       },
       "required": [

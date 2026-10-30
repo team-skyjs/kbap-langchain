@@ -84,6 +84,8 @@ jobs:
       # ① 평가 플래그 — 없으면 켠다. 환경변수 맵은 통째로 교체되므로 기존 값을 읽어 병합한다.
       #    값(API 토큰·Jev 키)은 출력하지 않고 마스킹하며, ④의 유출 검사용으로 러너 임시 디렉터리에만 둔다.
       - name: enable eval flag on dev function
+        env:
+          LIVE: ${{ inputs.live }}
         run: |
           set -euo pipefail
           test "$FUNCTION" = kbap-generate-content
@@ -106,6 +108,12 @@ jobs:
             echo "KBAP_EVAL_ENABLED=true 반영(다른 변수 보존: $(jq 'length' "$env_json")개 키)"
           fi
           aws lambda get-function --function-name "$FUNCTION" --query 'Code.ImageUri' --output text
+          # live 는 유료 호출 전에 키 이름만 확인한다(값은 보지 않음) — 없으면 첫 조각에서 A 비용만 쓰고 B 가 죽는다.
+          if [ "$LIVE" = true ]; then
+            for k in OPENAI_API_KEY TYPESAFE_API_KEY; do
+              [ -n "$(jq -r --arg k "$k" '.[$k] // ""' "$env_json")" ] || { echo "::error::dev 함수 환경변수에 $k 없음"; exit 1; }
+            done
+          fi
 
       # ② 조각 invoke — 실패한 조각은 건너뛰고 끝에 목록을 남긴다.
       - name: invoke chunks
@@ -115,8 +123,11 @@ jobs:
           SPLIT: ${{ inputs.split }}
           CHUNK: ${{ inputs.chunk_size }}
           LIVE: ${{ inputs.live }}
+          # 누적 비용이 이 값을 넘으면 남은 조각을 돌리지 않는다. 단가는 kbap.evaluate.PRICES 와 같게.
+          MAX_USD: "1.5"
         run: |
           set -euo pipefail
+          spent=0
           size="${CHUNK:-}"
           [ -n "$size" ] || size=$([ "$MODE" = fixed ] && echo 20 || echo 5)
           [[ "$size" =~ ^[1-9][0-9]*$ ]] || { echo "chunk_size 는 양의 정수: $size" >&2; exit 1; }
@@ -141,7 +152,15 @@ jobs:
                  --query 'FunctionError' --output text > "$RUNNER_TEMP/fe.txt" \
                && [ "$(cat "$RUNNER_TEMP/fe.txt")" = None ] \
                && jq -e '.manifest and (.rows != null)' "$out" > /dev/null; then
-              echo "조각 $i 완료"
+              spent=$(jq -r --argjson prev "$spent" '$prev + ([.rows[] |
+                ((.llm_usage.input_tokens // 0) * 0.10 + (.llm_usage.output_tokens // 0) * 0.50
+                 + (.trace.usage.input_tokens // 0) * 0.042) / 1e6] | add // 0)' "$out")
+              echo "조각 $i 완료 — 누적 비용 \$$(printf %.4f "$spent")"
+              if jq -en --argjson s "$spent" --argjson m "$MAX_USD" '$s > $m' > /dev/null; then
+                echo "::error::누적 비용이 \$$MAX_USD 를 넘어 남은 조각을 중단(조각 $i 까지)"
+                echo "budget stop after $i" >> "$RUNNER_TEMP/failed.txt"
+                break
+              fi
             else
               # 본문은 출력하지 않는다(데이터셋 텍스트가 섞일 수 있고 public 레포 로그는 공개된다).
               echo "조각 $i 실패(시작 $start): $(jq -r '.errorType // (if .eval then "eval=\(.eval)" else "결과 없음" end)' "$out" 2>/dev/null || echo 응답 없음)"

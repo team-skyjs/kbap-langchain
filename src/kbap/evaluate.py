@@ -21,6 +21,7 @@ from typing import Literal
 
 import httpx
 import yaml
+from langchain_core.callbacks import get_usage_metadata_callback
 from pydantic import BaseModel, model_validator
 
 from kbap import jev
@@ -79,6 +80,7 @@ class Item(BaseModel):
     note: str = ""
     # 라벨 확정 상태 — draft 가 섞이면 지표는 잠정이다(manifest·summary 에 표시).
     label_status: Literal["draft", "reviewed", "confirmed"] | None = None
+    needs_human: bool | None = None  # 사람 확인 필요(R-145) — summary 에서 확정 전 수치로 따로 센다
 
 
 class Dataset(BaseModel):
@@ -311,12 +313,15 @@ async def run_fixed(ds: Dataset, engines: dict, concurrency: int) -> list[dict]:
         fns, reviews = engines[engine]()
         async with sem:
             started = time.monotonic()
-            try:
-                r = await _review(fns, node, item)
-                row.update(decision=_decision(node, r), reason=r.reason, trace=r._trace)
-            except Exception as e:  # 실패는 통계에서 빼지 않는다 — 실패율 분자다
-                row.update(error=f"{type(e).__name__}: {e}"[:300])
+            # LLM 토큰은 태스크마다 따로 센다(contextvar) — 실제 비용 집계용. Jev 는 trace.usage.
+            with get_usage_metadata_callback() as cb:
+                try:
+                    r = await _review(fns, node, item)
+                    row.update(decision=_decision(node, r), reason=r.reason, trace=r._trace)
+                except Exception as e:  # 실패는 통계에서 빼지 않는다 — 실패율 분자다
+                    row.update(error=f"{type(e).__name__}: {e}"[:300])
             row["latency_ms"] = round((time.monotonic() - started) * 1000)
+            row["llm_usage"] = {k: sum(u.get(k, 0) for u in cb.usage_metadata.values()) for k in ("input_tokens", "output_tokens")}
         row["jev_requests"] = reviews.requests if reviews else 0
         return row
 
@@ -397,6 +402,44 @@ def _p(values: list[float], q: float):
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
 
+# 1M 토큰당 달러 — 2026-10-30 기준(LLM: config.yaml 주석의 gpt-6-luna 단가, Jev: TypeSafe 공개가). 바뀌면 여기만.
+PRICES = {"llm_in": 0.10, "llm_out": 0.50, "jev_in": 0.042}
+
+
+def cost(rows: list[dict]) -> dict:
+    llm_in = sum((r.get("llm_usage") or {}).get("input_tokens", 0) for r in rows)
+    llm_out = sum((r.get("llm_usage") or {}).get("output_tokens", 0) for r in rows)
+    jev_in = sum(((r.get("trace") or {}).get("usage") or {}).get("input_tokens", 0) for r in rows)
+    usd = (llm_in * PRICES["llm_in"] + llm_out * PRICES["llm_out"] + jev_in * PRICES["jev_in"]) / 1e6
+    return {"llm_in": llm_in, "llm_out": llm_out, "jev_in": jev_in, "usd": usd}
+
+
+# 노드별 정답 라벨 — passed 와 바로 비교한다.
+_NODE_LABEL = {"review_name": ("이름", "name_ok"), "review_description": ("설명", "description_ok"),
+               "review_ingredients": ("기피성분", "ingredients_ok")}
+
+
+def node_metrics(rows: list[dict], items: dict[str, Item]) -> dict[str, dict[str, str]]:
+    """노드 × 엔진 정답 일치 — 잘못 통과(라벨 false 인데 통과)가 안전 핵심. 실패는 일치에서 빠지지 않고 분모에 남는다."""
+    out = {}
+    for engine in ("A", "B"):
+        col, total = {}, [0, 0]
+        for node, (name, field) in _NODE_LABEL.items():
+            sub = [(r, getattr(items[r["item"]].labels, field)) for r in rows
+                   if r["engine"] == engine and r["node"] == node and getattr(items[r["item"]].labels, field) is not None]
+            ok = sum(bool(r.get("decision")) and r["decision"]["passed"] == lab for r, lab in sub)
+            bad = sum(not lab for _, lab in sub)
+            fp = sum(not lab and bool(r.get("decision")) and r["decision"]["passed"] for r, lab in sub)
+            fn = sum(lab and bool(r.get("decision")) and not r["decision"]["passed"] for r, lab in sub)
+            col[f"{name} 일치"] = _rate(ok, len(sub))
+            col[f"{name} 잘못 통과"] = _rate(fp, bad)
+            col[f"{name} 잘못 반려"] = _rate(fn, len(sub) - bad)
+            total[0] += ok
+            total[1] += len(sub)
+        out[engine] = {"전체 일치": _rate(*total)} | col
+    return out
+
+
 def fixed_metrics(rows: list[dict], labels: dict[str, Labels]) -> dict[str, dict[str, str]]:
     """§6.4 지표 — 분모를 함께 적는다. 실패·보류를 제외하지 않는다."""
     out = {}
@@ -431,6 +474,8 @@ def fixed_metrics(rows: list[dict], labels: dict[str, Labels]) -> dict[str, dict
             "검수 지연 p50/p95 ms": f"{_p(lat, .5)} / {_p(lat, .95)} (n={len(lat)})",
             "Jev 입력 토큰 합": str(tokens),
             "Jev 요청 수(재시도 포함)": str(sum(r.get("jev_requests", 0) for r in er)),
+            "LLM 입력/출력 토큰 합": "{llm_in} / {llm_out}".format(**cost(er)),
+            "비용(단가×토큰, $)": f"{cost(er)['usd']:.4f}",
         }
     return out
 
@@ -523,6 +568,10 @@ def summary_text(manifest: dict, items: dict[str, Item], fixed_rows: list[dict],
             sub = [r for r in fixed_rows if r["source"] == source]
             if sub:
                 body += [f"\n## 고정 입력 검수 — {source}\n", _table(fixed_metrics(sub, labels))]
+        for title, keep in (("needs_human 아님", False), ("needs_human — R-145 확정 전, 잠정", True)):
+            sub = [r for r in fixed_rows if bool(items[r["item"]].needs_human) == keep]
+            if sub:
+                body += [f"\n## 노드별 정답 일치 — {title}\n", _table(node_metrics(sub, items))]
         dis = disagreements(fixed_rows, items)
         body.append(f"\n불일치 {len(dis)}건 → `disagreements.csv`")
     if pipeline_rows:
