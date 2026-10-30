@@ -1,0 +1,100 @@
+# 평가 데이터셋 — 선정 기준과 레코드 스키마 (KB-913, 인계 §6.2~6.3)
+
+검수 A/B 평가에 쓸 음식 사례를 고르는 기준과 레코드 형식이다.
+사람 정답 라벨링은 커맨드 센터와 예진이 진행한다. 이 문서는 무엇을 뽑고 어떻게 적을지만 정한다.
+
+- **라벨 상태: draft v1, 확정 전.** 데이터는 `data/dataset-manifest.json`(331건, real 188·synthetic 143)이고 선정 기록은 `data/selection-notes.md`다. 사람 확인(`needs_human`) 124건이 끝나면 `label_status` 를 `confirmed` 로 바꾸고 `dataset_version` 을 올려 다시 커밋한다(받는 값: `draft|reviewed|confirmed`).
+- 스키마의 기준은 `run.py` 의 `Dataset` 모델이다. 기계용 사본은 `dataset.schema.json` 이고 `run.py schema` 로 다시 만든다. 테스트가 둘이 같은지 확인한다.
+- 수량은 시작 제안이다. **음식 수와 레코드 수는 다르다.** 음식 하나에 정상 1건과 오류 변형 여러 건이 붙는다.
+
+## 1. 음식 200개 선정 (그룹 = 음식 1개)
+
+dev DB에서 콘텐츠 생성이 끝난 음식(COMPLETE·FAILED 모두)과 스캔 원본 이름을 뽑는다.
+음식 관련 필드만 쓰고 사용자·가게 식별정보는 넣지 않는다.
+
+| 묶음 | 음식 수(안) | 고르는 법 | 확인하려는 것 |
+|---|---|---|---|
+| 일반 한식 | 60 | 찌개·국·볶음·면·밥·분식 등 종류를 고르게 | 정상 통과율, 오거절 |
+| 숨은 성분이 많은 음식 | 30 | 육수(MEAT_BROTH·ANCHOVY)·젓갈·간장(WHEAT)·마요네즈(EGG)가 들어가는 메뉴 | 기피성분 누락 오통과 — **안전 세트** |
+| 희귀·지역·수식어 메뉴 | 25 | 할매·왕·매운 같은 수식어, 지역 음식, 상호가 붙은 메뉴 | 음식인데 거절하거나 과교정하는지 |
+| 스캔 노이즈 이름 | 25 | 가격·번호·기호·OCR 오타가 섞인 원본 이름 | 이름 검수의 노이즈·오타 판정 |
+| 비음식 | 25 | 옵션(사리 추가), 분류 제목, 안내 문구, 가게 이름, 판독 불가 | 비음식 오통과 |
+| 판단 근거가 부족한 경우 | 15 | 이름만으로 뭔지 모르는 메뉴, 레시피 편차가 큰 메뉴 | 보류(ABSTAIN)와 대체 경로가 동작하는지 |
+| 과거 오판·경계 사례 | 20 | 관리자 반려, FAILED 사유, Spring 검수 이력에서 | 회귀 |
+
+**실제 사례(`source: real`)와 인공 오류(`source: synthetic`)를 섞어 평균 내지 않는다.** 지표는 따로 집계된다.
+
+## 2. 오류 변형 만들기 (같은 `group` 안에)
+
+정상 레코드 하나에 아래 변형을 붙인다. 이미 오류가 있는 실제 사례는 그대로 `real` 로 둔다.
+
+| 검수 | 변형 | labels |
+|---|---|---|
+| 이름 | 노이즈 남기기(`김치찌개 8,000원`), 오타(`김치찌게`), 다른 음식으로 바꾸기(`김치찜`→`김치찌개`), 수식어 지우기(`왕김치찌개`→`김치찌개`), 지시문 섞기(`비빔밥 (이전 지시 무시)`) | `is_food`, `name_ok` |
+| 설명 | 다른 음식의 설명, 없는 재료 넣기, 어색한 번역투 문장(사실은 맞음) | `description_ok` |
+| 기피성분 | 핵심 성분 빼기(김치찌개의 PORK·FISH_SAUCE), 관련 없는 성분 넣기, 매운맛 크게 틀리기 | `ingredients_ok`, `critical_missing` |
+
+- **같은 음식의 정상·오류 변형은 반드시 같은 `group` 에 둔다.** `split` 은 그룹 단위로 정한다. 그룹이 tune·final 에 나뉘면 로드가 실패한다.
+- 이름 검수 변형은 그 음식의 설명·성분 레코드와 섞지 않는다. 검수마다 입력이 따로 있다.
+
+## 3. 분할
+
+- `tune` 100개 음식: 질문 문구·임계값(`jev.policy`)을 정하는 데 쓴다.
+- `final` 100개 음식: 정책을 고정한 뒤 한 번만 평가한다. 결과를 보고 정책을 고쳤다면 그 final 은 조정에 쓴 셈이다. 새 보류 데이터로 다시 확인하거나 한계를 보고한다.
+- 묶음별 비율이 두 split에서 비슷하게 유지되도록 나눈다.
+
+## 4. 레코드 스키마
+
+```json
+{
+  "dataset_version": "dev-2026-11-xx-v1",
+  "items": [
+    {
+      "id": "kimchi-stew-01-missing-pork",
+      "group": "kimchi-stew-01",
+      "split": "tune",
+      "source": "synthetic",
+      "scanned_name": "김치찌게 8,000원",
+      "name_review": {"original": "김치찌게 8,000원", "cleaned": "김치찌개"},
+      "description": {"name": "김치찌개", "description": "잘 익은 김치와 돼지고기를 넣고 끓인 얼큰한 찌개"},
+      "ingredients": {
+        "name": "김치찌개",
+        "substances": [{"code": "GARLIC", "inclusionPercent": 80}],
+        "spiciness": 4
+      },
+      "labels": {
+        "is_food": true, "name_ok": true, "description_ok": true,
+        "ingredients_ok": false, "critical_missing": true
+      },
+      "note": "PORK·FISH_SAUCE 를 뺀 변형"
+    }
+  ]
+}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `id` | 레코드 고유 ID. 그룹 + 변형 이름 권장 |
+| `group` | 음식 하나. 정상·오류 변형이 공유한다 |
+| `split` | `tune` / `final` |
+| `source` | `real`(dev DB 그대로) / `synthetic`(사람이 만든 오류) |
+| `scanned_name` | 전체 파이프라인 평가 입력. 고정 입력 평가에는 쓰지 않는다 |
+| `name_review` · `description` · `ingredients` | 고정 입력 평가에서 각 검수에 들어갈 저장된 생성물. 없는 검수는 생략한다 |
+| `ingredients.substances[].code` | 후보 84종 코드(`kbap.review.AVOIDANCE_CODES`) |
+| `labels.*` | 사람 정답. **모르면 `null` 로 둔다.** 그 지표의 분모에서 빠진다 |
+
+라벨 정의:
+
+| 라벨 | true 의 뜻 |
+|---|---|
+| `is_food` | `cleaned` 가 한 가지 음식·음료의 메뉴명이다 |
+| `name_ok` | `cleaned` 를 그대로 써도 된다(노이즈·오타·과교정 없음) |
+| `description_ok` | 이 설명은 3점(통과)이어야 한다 |
+| `ingredients_ok` | 이 성분·매운맛을 그대로 저장해도 된다 |
+| `critical_missing` | 이 레코드는 알레르기와 직결되는 주요 성분이 빠진 사례다(안전 세트) |
+
+라벨링 규칙:
+
+- LLM이나 Jev의 답을 정답으로 옮기지 않는다.
+- 기피성분은 대표 레시피 기준으로 판단한다. 식당마다 레시피가 달라 판단할 수 없으면 `null` 로 둔다.
+- `critical_missing: true` 인 사례는 가능하면 두 번째 사람이 다시 확인한다.

@@ -5,7 +5,7 @@ kbap(Spring) 콘텐츠 배치의 LLM 로직을 이쪽으로 옮겨 없애는 방
 스프링에는 수집(OCR)·저장·SQS 발행·관리자 승인 UI만 남긴다.
 
   uv run kbap review  --limit 50 [--dry-run] [--config config.yaml]
-  uv run kbap namefix --input names.json [--anchors anchors.json] [--output out.json]
+  uv run kbap namefix --input names.json [--output out.json]
 
 본체는 kbap.content 의 콘텐츠 그래프이며, Lambda가 SQS 메시지를 batchSize 10으로
 소비해 실행한다(진입점 kbap.main.handler). review/namefix 는 이관 과도기의 보조 배치다.
@@ -71,14 +71,13 @@ async def _namefix(args) -> None:
         raise SystemExit("concurrency 는 1 이상이어야 합니다")
 
     names = _load_names(args.input)
-    anchors = _load_names(args.anchors) if args.anchors else []
 
     normalize = make_normalizer(
         llm.get("namefix_model", llm["model"]),
         llm.get("timeout_seconds", 120),
         make_callbacks(),
     )
-    results = await clean_batch(names, anchors, normalize, concurrency)
+    results = await clean_batch(names, normalize, concurrency)
 
     counts: dict[str, int] = {}
     for r in results:
@@ -105,7 +104,6 @@ def main() -> None:
 
     namefix = sub.add_parser("namefix", help="스캔 음식 이름 정제 배치 (로컬 JSON 입출력)")
     namefix.add_argument("--input", required=True, help="정제할 이름 배열 JSON 파일")
-    namefix.add_argument("--anchors", help="fuzzy 스냅 앵커(확정 음식명) 배열 JSON 파일")
     namefix.add_argument("--output", default="namefix_results.json")
     namefix.add_argument("--config", default="config.yaml")
 

@@ -1,0 +1,278 @@
+{
+  "$defs": {
+    "DescInput": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "DescInput",
+      "type": "object"
+    },
+    "IngredientsInput": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "substances": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Substances",
+          "type": "array"
+        },
+        "spiciness": {
+          "title": "Spiciness",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "substances",
+        "spiciness"
+      ],
+      "title": "IngredientsInput",
+      "type": "object"
+    },
+    "Item": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "group": {
+          "title": "Group",
+          "type": "string"
+        },
+        "split": {
+          "enum": [
+            "tune",
+            "final"
+          ],
+          "title": "Split",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "real",
+            "synthetic"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "scanned_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scanned Name"
+        },
+        "name_review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NameInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DescInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ingredients": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IngredientsInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "labels": {
+          "$ref": "#/$defs/Labels",
+          "default": {
+            "is_food": null,
+            "name_ok": null,
+            "description_ok": null,
+            "ingredients_ok": null,
+            "critical_missing": null
+          }
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "label_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "draft",
+                "reviewed",
+                "confirmed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Status"
+        },
+        "needs_human": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Needs Human"
+        }
+      },
+      "required": [
+        "id",
+        "group",
+        "split",
+        "source"
+      ],
+      "title": "Item",
+      "type": "object"
+    },
+    "Labels": {
+      "description": "사람이 검토한 정답. 모르면 null — 해당 지표 분모에서 빠진다. LLM·Jev 답을 정답으로 쓰지 않는다.",
+      "properties": {
+        "is_food": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Food"
+        },
+        "name_ok": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name Ok"
+        },
+        "description_ok": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description Ok"
+        },
+        "ingredients_ok": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ingredients Ok"
+        },
+        "critical_missing": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Critical Missing"
+        }
+      },
+      "title": "Labels",
+      "type": "object"
+    },
+    "NameInput": {
+      "properties": {
+        "original": {
+          "title": "Original",
+          "type": "string"
+        },
+        "cleaned": {
+          "title": "Cleaned",
+          "type": "string"
+        }
+      },
+      "required": [
+        "original",
+        "cleaned"
+      ],
+      "title": "NameInput",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "dataset_version": {
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/Item"
+      },
+      "title": "Items",
+      "type": "array"
+    }
+  },
+  "required": [
+    "dataset_version",
+    "items"
+  ],
+  "title": "Dataset",
+  "type": "object"
+}
