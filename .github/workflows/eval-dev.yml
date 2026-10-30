@@ -24,6 +24,10 @@ on:
         type: choice
         options: [all, tune, final]
         default: all
+      nodes:
+        description: fixed 에서 볼 검수 노드(쉼표 목록 name,description,ingredients) — 나머지 입력은 비워 호출하지 않는다
+        required: false
+        default: name,description,ingredients
       chunk_size:
         description: invoke 1회당 항목 수(비우면 fixed 20 / pipeline 5 — 함수 Timeout 300s 기준)
         required: false
@@ -123,6 +127,7 @@ jobs:
           SPLIT: ${{ inputs.split }}
           CHUNK: ${{ inputs.chunk_size }}
           LIVE: ${{ inputs.live }}
+          NODES: ${{ inputs.nodes }}
           # 누적 비용이 이 값을 넘으면 남은 조각을 돌리지 않는다. 단가는 kbap.evaluate.PRICES 와 같게.
           MAX_USD: "1.5"
         run: |
@@ -135,8 +140,19 @@ jobs:
           sel='[.items[] | select($split == null or .split == $split)'
           sel+=$([ "$MODE" = pipeline ] && echo ' | select(.scanned_name != null)]' || echo ']')
           jq --argjson split "$split_json" "$sel" "$DATASET" > "$RUNNER_TEMP/items.json"
+          if [ "$MODE" = fixed ]; then
+            # 고르지 않은 노드의 입력을 null 로 — run_fixed 는 입력이 있는 노드만 돈다. 남은 입력이 없는 항목은 뺀다.
+            nodes_json=$(jq -cn --arg n "${NODES:-name,description,ingredients}" '$n | split(",") | map(gsub(" "; ""))')
+            jq -en --argjson n "$nodes_json" '($n | length > 0) and all($n[]; IN("name", "description", "ingredients"))' > /dev/null \
+              || { echo "nodes 는 name,description,ingredients 중에서: $NODES" >&2; exit 1; }
+            jq --argjson n "$nodes_json" '{name: "name_review", description: "description", ingredients: "ingredients"} as $f
+              | map(reduce ($f | to_entries[] | select(.key as $k | $n | index($k) | not) | .value) as $drop (.; .[$drop] = null)
+                    | select(.name_review != null or .description != null or .ingredients != null))' \
+              "$RUNNER_TEMP/items.json" > "$RUNNER_TEMP/items.sel.json"
+            mv "$RUNNER_TEMP/items.sel.json" "$RUNNER_TEMP/items.json"
+          fi
           total=$(jq length "$RUNNER_TEMP/items.json")
-          echo "항목 $total 개, 조각 크기 $size, live=$LIVE"
+          echo "항목 $total 개, 노드 ${NODES:-전체}, 조각 크기 $size, live=$LIVE"
           mkdir -p "$RUNNER_TEMP/resp"
           : > "$RUNNER_TEMP/failed.txt"
           i=0
