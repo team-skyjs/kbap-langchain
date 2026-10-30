@@ -33,7 +33,7 @@ from kbap.content import DescReview, IngredientsReview, NameReview
 from kbap.review import AVOIDANCE_CODES
 
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
-POLICY_VERSION = "kb913-v0-uncalibrated"
+POLICY_VERSION = "kb913-v1-uncalibrated"  # v1: 기피성분 질문을 성분별로 바꾸며 임계값도 새로 둠
 
 PASS, REVISE, ABSTAIN = "PASS", "REVISE", "ABSTAIN"
 
@@ -62,8 +62,13 @@ class JevPolicy:
     # 결함 질문 공통 — 모두 defect_pass_max 미만이면 통과, 하나라도 defect_min 이상이면 수정 필요.
     defect_pass_max: float = 0.3
     defect_min: float = 0.7
-    # 기피성분 누락만 예외 — 알레르기 데이터는 오통과가 누락보다 위험해 통과 상한을 낮춘다.
-    missing_pass_max: float = 0.1
+    # 기피성분(성분별 질문, ing-v1): 포함확률 이 % 이상으로 적힌 성분인데 "들어가는가" 가 unrelated_max 이하면
+    # 무관 성분. 안 적힌 숨은 성분이 missing_min 이상이면 누락, missing_abstain_min 이상이면 보류(→ LLM) —
+    # 알레르기 데이터는 오통과가 누락보다 위험해 누락 쪽 보류 구간을 넓게 둔다.
+    listed_min_percent: int = 50
+    unrelated_max: float = 0.2
+    missing_min: float = 0.8
+    missing_abstain_min: float = 0.5
     # 설명 Score(0~2 등급): 최상 등급 확률이 이 값 이상이어야 3점.
     desc_pass_min: float = 0.8
     # 하위 두 등급 확률 합이 이 값 이상이면 미달(1·2점), 둘 다 아니면 보류.
@@ -154,23 +159,50 @@ DESC_QUESTIONS = {
     },
 }
 
-INGREDIENT_QUESTIONS = {
-    "missing_major": {
-        "type": "noul",
-        "instructions": (
-            "`name` 에 일반적으로 들어가는 기피성분 중 `catalog` 에 있는데 `ingredients` 에 없는 것이 있는가? "
-            "양념·육수·가공 재료 속 성분도 포함한다."
-        ),
-    },
-    "unrelated": {
-        "type": "noul",
-        "instructions": "`ingredients` 에 `name` 에 들어가지 않는 성분이 있는가?",
-    },
-    "spiciness_wrong": {
-        "type": "noul",
-        "instructions": "`spiciness`(0 맵지 않음 ~ 10 매우 매움)는 `name` 의 일반적인 매운 정도와 3단계 이상 차이 나는가?",
-    },
+# 기피성분 ing-v1 — v0 의 존재형 질문("목록 중 하나라도 ~인가")은 정답과 무관하게 '예'였다(live run 41122710568:
+# 정상·오류 레코드의 unrelated 중앙값 둘 다 0.91). 성분 하나 = 질문 하나로 쪼개고 판단은 decide_ingredients 가 한다.
+# 적힌 성분(listed_*)과 숨은 성분 후보(hidden_*)는 같은 문구로 묻는다 — 같은 확률을 같은 뜻으로 읽기 위해서다.
+INGREDIENT_QUESTION_VERSION = "ing-v1-per-item"
+# 누락은 84개 전체가 아니라 양념·육수·가공 재료에 숨는 고위험 코드만 묻는다(평가 데이터셋 안전 세트 기준).
+# 묶음 코드(SEAFOOD 등)만 적힌 경우에도 하위 코드(SHRIMP)를 따로 묻는다 — 이 때문에 누락 오탐이 나면 tune 에서 본다.
+HIDDEN_CODES = (
+    "SALTED_SHRIMP", "SHRIMP", "FISH_SAUCE", "ANCHOVY", "FISH", "WHEAT", "SOY",
+    "EGG", "MILK", "PEANUT", "BUCKWHEAT", "MUSTARD", "SESAME",
+)
+CONTAINS_TEMPLATE = (
+    "`name` 을 일반적인 레시피대로 만들면 {ingredient} 성분이 들어가는가? "
+    "양념·육수·소스·가공 재료 속에 든 경우도 포함한다."
+)
+CONTAINS_CRITERIA = {"true": "대부분의 가게 레시피에 그 성분이 들어간다", "false": "들어가지 않거나 일부 가게만 넣는다"}
+SPICINESS_QUESTION = {
+    "type": "noul",
+    "instructions": "`spiciness`(0 맵지 않음 ~ 10 매우 매움)는 `name` 의 일반적인 매운 정도와 3단계 이상 차이 나는가?",
 }
+# 감사·manifest 용 고정 부분 — 실제 요청의 질문은 ingredient_questions() 가 성분 목록으로 만든다.
+INGREDIENT_QUESTIONS = {
+    "version": INGREDIENT_QUESTION_VERSION,
+    "contains": {"type": "noul", "instructions": CONTAINS_TEMPLATE, "criteria": CONTAINS_CRITERIA},
+    "hidden_codes": list(HIDDEN_CODES),
+    "spiciness_wrong": SPICINESS_QUESTION,
+}
+
+
+def _contains(code: str) -> dict:
+    return {
+        "type": "noul",
+        "instructions": CONTAINS_TEMPLATE.format(ingredient=f"{CATALOG[code]}({code})"),
+        "criteria": CONTAINS_CRITERIA,
+    }
+
+
+def ingredient_questions(substances: list[dict]) -> dict:
+    listed = list(dict.fromkeys(s["code"] for s in substances))
+    return (
+        {f"listed_{c}": _contains(c) for c in listed}
+        | {f"hidden_{c}": _contains(c) for c in HIDDEN_CODES if c not in listed}
+        | {"spiciness_wrong": SPICINESS_QUESTION}
+    )
+
 
 # 사유 코드 → 재생성 피드백 고정 문구. 관측한 질문만 근거로 하며 구체 성분명을 지어내지 않는다.
 FEEDBACK = {
@@ -256,13 +288,23 @@ def decide_description(answers: dict, policy: JevPolicy) -> tuple[str, int | Non
     return REVISE, score, codes
 
 
-def decide_ingredients(answers: dict, policy: JevPolicy) -> tuple[str, list[str]]:
-    return _defects(
-        answers,
-        {"missing_major": "MISSING_INGREDIENT", "unrelated": "UNRELATED_INGREDIENT", "spiciness_wrong": "SPICINESS_WRONG"},
-        policy,
-        {"missing_major": policy.missing_pass_max},
+def decide_ingredients(answers: dict, substances: list[dict], policy: JevPolicy) -> tuple[str, list[str]]:
+    hidden = [a["noul"] for q, a in answers.items() if q.startswith("hidden_")]
+    unrelated = any(
+        s["inclusionPercent"] >= policy.listed_min_percent and answers[f"listed_{s['code']}"]["noul"] <= policy.unrelated_max
+        for s in substances
     )
+    spicy = answers["spiciness_wrong"]["noul"]
+    codes = (
+        ["MISSING_INGREDIENT"] * any(p >= policy.missing_min for p in hidden)
+        + ["UNRELATED_INGREDIENT"] * unrelated
+        + ["SPICINESS_WRONG"] * (spicy >= policy.defect_min)
+    )
+    if codes:
+        return REVISE, codes
+    if any(p >= policy.missing_abstain_min for p in hidden) or spicy >= policy.defect_pass_max:
+        return ABSTAIN, []
+    return PASS, []
 
 
 # ===== HTTP =====
@@ -414,22 +456,15 @@ class JevReviews:
         return result
 
     async def review_ingredients(self, name: str, ingredients: dict) -> IngredientsReview:
-        # 사람이 보고 판단할 형태로 — 코드만이 아니라 한국어 이름을 함께 준다. 후보 밖 코드는 이미
-        # valid_substances 가 걸렀으므로 묻지 않는다.
-        state = {
-            "name": name,
-            "ingredients": [
-                {"성분": CATALOG[i["code"]], "code": i["code"], "포함확률%": i["inclusionPercent"]}
-                for i in ingredients["substances"]
-            ],
-            "spiciness": ingredients["spiciness"],
-            "catalog": list(CATALOG.values()),
-        }
-        answers, trace = await self._ask("review_ingredients", state, INGREDIENT_QUESTIONS)
+        # 성분 목록은 state 가 아니라 질문으로 간다(성분 하나 = 질문 하나). 후보 밖 코드는 valid_substances 가 이미 걸렀다.
+        substances = ingredients["substances"]
+        state = {"name": name, "spiciness": ingredients["spiciness"]}
+        answers, trace = await self._ask("review_ingredients", state, ingredient_questions(substances))
+        trace["question_version"] = INGREDIENT_QUESTION_VERSION
         call = lambda: self.llm.review_ingredients(name, ingredients)  # noqa: E731
         if answers is None:
             return await self._fallback(trace, "outage", call)
-        outcome, codes = decide_ingredients(answers, self.policy)
+        outcome, codes = decide_ingredients(answers, substances, self.policy)
         trace.update(outcome=outcome, reason_codes=codes)
         if outcome == ABSTAIN:
             return await self._fallback(trace, "abstain", call)

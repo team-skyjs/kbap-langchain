@@ -15,14 +15,17 @@ from kbap.content import apply_review_engine, build_content_graph, build_ingest_
 from kbap.jev import (
     DESC_QUESTIONS,
     FEEDBACK,
-    INGREDIENT_QUESTIONS,
+    HIDDEN_CODES,
+    INGREDIENT_QUESTION_VERSION,
     NAME_QUESTIONS,
     JevPolicy,
     JevRequestError,
     JevReviews,
     JevSettings,
     JevTransientError,
+    decide_ingredients,
     decide_name,
+    ingredient_questions,
     desc_score,
     with_jev_reviews,
 )
@@ -63,6 +66,32 @@ def name_answers(is_food, noise=0.0, typo=0.0):
     }
 
 
+def test_ingredient_questions_one_per_item_and_hidden_excludes_listed():
+    q = ingredient_questions([{"code": "PORK", "inclusionPercent": 95}, {"code": "SOY", "inclusionPercent": 60}])
+    assert {"listed_PORK", "listed_SOY", "spiciness_wrong"} <= set(q)
+    assert "hidden_SOY" not in q and {f"hidden_{c}" for c in HIDDEN_CODES if c != "SOY"} <= set(q)
+    # 적힌 성분과 숨은 후보는 같은 문구 — 성분 이름만 다르다.
+    assert q["listed_SOY"]["instructions"] == q["hidden_EGG"]["instructions"].replace("계란(EGG)", "대두(SOY)")
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({}, ("PASS", [])),
+        ({"listed_SOY": noul(0.1)}, ("REVISE", ["UNRELATED_INGREDIENT"])),  # 포함확률 60% 인데 안 들어감
+        ({"listed_GARLIC": noul(0.1)}, ("PASS", [])),  # 포함확률 30% 는 무관 판단에서 뺀다
+        ({"hidden_FISH_SAUCE": noul(0.85)}, ("REVISE", ["MISSING_INGREDIENT"])),
+        ({"hidden_FISH_SAUCE": noul(0.6)}, ("ABSTAIN", [])),
+        ({"spiciness_wrong": noul(0.9), "hidden_EGG": noul(0.9)}, ("REVISE", ["MISSING_INGREDIENT", "SPICINESS_WRONG"])),
+    ],
+)
+def test_decide_ingredients_per_item(overrides, expected):
+    subs = [{"code": "PORK", "inclusionPercent": 95}, {"code": "SOY", "inclusionPercent": 60},
+            {"code": "GARLIC", "inclusionPercent": 30}]
+    answers = answers_for(ingredient_questions(subs), overrides)
+    assert decide_ingredients(answers, subs, JevPolicy()) == expected
+
+
 def test_uncertain_food_is_abstain_not_forced_to_not_food():
     assert decide_name(name_answers(0.5), POLICY) == ("ABSTAIN", None, [])
     assert decide_name(name_answers(0.1), POLICY) == ("REVISE", False, ["NOT_FOOD"])
@@ -80,7 +109,8 @@ def answers_for(questions, overrides):
         if q["type"] == "score":
             out[qid] = {"type": "score", "score": 1.9, "confidence": 0.8, "probabilities": {"0": 0.02, "1": 0.08, "2": 0.9}}
         else:
-            out[qid] = noul(0.97 if qid == "is_food" else 0.02)
+            # 적힌 성분은 "들어간다"가 깨끗한 답이다(성분별 질문 ing-v1).
+            out[qid] = noul(0.97 if qid == "is_food" or qid.startswith("listed_") else 0.02)
     out.update(overrides)
     return out
 
@@ -96,10 +126,10 @@ class FakeJev:
         import json
 
         body = json.loads(request.content)
-        node = {
+        # 기피성분 질문은 성분 목록마다 달라 질문 키로 구분한다.
+        node = "ing" if "spiciness_wrong" in body["questions"] else {
             frozenset(NAME_QUESTIONS): "name",
             frozenset(DESC_QUESTIONS): "desc",
-            frozenset(INGREDIENT_QUESTIONS): "ing",
         }[frozenset(body["questions"])]
         self.requests[node] += 1
         assert request.headers["authorization"] == "Bearer test-key"
@@ -170,6 +200,7 @@ async def test_clean_jev_run_uses_six_llm_calls_and_three_jev_requests():
     assert t["answers"]["quality"]["probabilities"]["2"] == 0.9
     assert t["usage"]["input_tokens"] == 100 and "latency_ms" in t
     assert "fallback" not in t
+    assert traces["review_ingredients"]["question_version"] == INGREDIENT_QUESTION_VERSION
 
 
 async def test_abstain_falls_back_to_llm_review_and_is_recorded():
@@ -210,8 +241,8 @@ async def test_revise_without_reason_code_asks_llm_for_reason():
 
 
 async def test_uncertain_missing_ingredient_falls_back_instead_of_passing():
-    # 누락 확률 0.15 — 일반 결함 기준(0.3)이면 통과지만 안전 직결이라 통과 상한(0.1)을 넘어 보류 → LLM.
-    fake = FakeJev(ing=[{"missing_major": noul(0.15)}])
+    # 숨은 성분(새우젓) 확률 0.6 — 누락 확정(0.8)은 아니지만 안전 직결이라 통과시키지 않고 보류 → LLM.
+    fake = FakeJev(ing=[{"hidden_SALTED_SHRIMP": noul(0.6)}])
     state, rec = await run_jev(fake)
 
     assert rec["llm_review_ingredients"] == ["김치찌개"]
