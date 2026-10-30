@@ -3,7 +3,7 @@
 검수 A/B 평가에 쓸 음식 사례를 고르는 기준과 레코드 형식이다.
 사람 정답 라벨링은 커맨드 센터와 예진이 진행한다. 이 문서는 무엇을 뽑고 어떻게 적을지만 정한다.
 
-- **라벨 상태: draft v1, 확정 전.** 데이터는 `data/dataset-manifest.json`(331건, real 188·synthetic 143)이고 선정 기록은 `data/selection-notes.md`다. 사람 확인(`needs_human`) 124건이 끝나면 `label_status` 를 `reviewed` 로 바꾸고 `dataset_version` 을 올려 다시 커밋한다(모델이 받는 값은 `draft|reviewed` — 선정 기록의 `confirmed` 가 아니다).
+- **라벨 상태: draft v1, 확정 전.** 데이터는 `data/dataset-manifest.json`(331건, real 188·synthetic 143)이고 선정 기록은 `data/selection-notes.md`다. 사람 확인(`needs_human`) 124건이 끝나면 `label_status` 를 `confirmed` 로 바꾸고 `dataset_version` 을 올려 다시 커밋한다(받는 값: `draft|reviewed|confirmed`).
 - 스키마의 기준은 `run.py` 의 `Dataset` 모델이다. 기계용 사본은 `dataset.schema.json` 이고 `run.py schema` 로 다시 만든다. 테스트가 둘이 같은지 확인한다.
 - 수량은 시작 제안이다. **음식 수와 레코드 수는 다르다.** 음식 하나에 정상 1건과 오류 변형 여러 건이 붙는다.
 

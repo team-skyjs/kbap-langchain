@@ -54,12 +54,14 @@ jobs:
       - uses: actions/checkout@v4
 
       # 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 데이터셋은 레포에 공개해 두었지만
-      # 결과(모델 출력·판정 행)는 암호화해서만 올린다 — 암호가 없으면 유료 호출 전에 중단한다.
+      # live 결과(실제 모델 출력·판정 행)는 암호화해서만 올린다 — 암호가 없으면 유료 호출 전에 중단한다.
+      # live=false 는 모의 응답뿐이라 암호가 없으면 평문으로 올린다.
       - name: check result passphrase
         env:
           HAS_PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE != '' }}
+          LIVE: ${{ inputs.live }}
         run: |
-          [ "$HAS_PASS" = true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — public 레포 artifact 를 평문으로 올리지 않는다"; exit 1; }
+          [ "$HAS_PASS" = true ] || [ "$LIVE" != true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — live 결과를 public 레포 artifact 에 평문으로 올리지 않는다"; exit 1; }
       - name: resolve dataset
         env:
           f: ${{ inputs.dataset_path }}
@@ -184,12 +186,14 @@ jobs:
           rm -f "$RUNNER_TEMP/secrets.txt" "$RUNNER_TEMP/env.json"
           echo "유출 검사 통과"
 
-      # 결과는 암호화해서만 올린다: gpg --decrypt <파일> | tar -xz
+      # 암호가 있으면 암호화해서 올린다: gpg --decrypt <파일> | tar -xz
       - name: encrypt results
         env:
           PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE }}
         run: |
           set -euo pipefail
+          # 암호 없이 여기 오는 건 live=false 뿐이다(live=true 는 맨 앞에서 중단).
+          if [ -z "$PASS" ]; then echo "unencrypted (dry run)"; exit 0; fi
           tar -czf - -C "$RUN_DIR" . | gpg --batch --yes --symmetric --cipher-algo AES256 \
             --passphrase-fd 3 3<<<"$PASS" -o "$RUNNER_TEMP/results.tar.gz.gpg"
           rm -rf "$RUN_DIR" && mkdir -p "$RUN_DIR" && mv "$RUNNER_TEMP/results.tar.gz.gpg" "$RUN_DIR/"

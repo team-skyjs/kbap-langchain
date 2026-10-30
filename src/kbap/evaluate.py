@@ -78,7 +78,7 @@ class Item(BaseModel):
     labels: Labels = Labels()
     note: str = ""
     # 라벨 확정 상태 — draft 가 섞이면 지표는 잠정이다(manifest·summary 에 표시).
-    label_status: Literal["draft", "reviewed"] | None = None
+    label_status: Literal["draft", "reviewed", "confirmed"] | None = None
 
 
 class Dataset(BaseModel):
@@ -243,7 +243,7 @@ def build_manifest(command: str, live: bool, ds: "Dataset", dataset_sha256: str,
         "dataset_sha256": dataset_sha256,
         "split": split,
         "items": len(ds.items),
-        "label_status": {k: sum(i.label_status == k for i in ds.items) for k in ("draft", "reviewed", None)},
+        "label_status": {k: sum(i.label_status == k for i in ds.items) for k in ("draft", "reviewed", "confirmed", None)},
         **engine_record,
         "jev_policy_version": jev.POLICY_VERSION,
         "jev_questions": {
