@@ -179,10 +179,14 @@ def test_collect_turns_lambda_responses_into_run_files(ev, monkeypatch, tmp_path
     resp.write_text(json.dumps(content.handler(eval_event(), None), ensure_ascii=False))
 
     out = tmp_path / "run"
-    text = ev.collect(str(SAMPLE), out, [str(resp)])
+    text = ev.collect(str(SAMPLE), out, [str(resp), str(resp)])
 
     assert (out / "results.jsonl").exists() and (out / "manifest.json").exists()
     assert "고정 입력 검수" in text
+    # 건수는 첫 조각이 아니라 조각 합계 — 조각 2개면 두 배.
+    n = len(json.loads(SAMPLE.read_text())["items"])
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["items"] == 2 * n and sum(manifest["label_status"].values()) == 2 * n
 
 
 def test_draft_labels_are_flagged_in_manifest_and_summary(ev, monkeypatch, tmp_path):

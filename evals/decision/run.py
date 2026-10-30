@@ -18,6 +18,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 from kbap.evaluate import *  # noqa: F403 — 테스트·노트북이 이 모듈로 같은 이름을 쓴다
@@ -84,6 +85,9 @@ def collect(dataset: str, out: Path, responses: list[str]) -> str:
         "dataset_sha256": hashlib.sha256(Path(dataset).read_bytes()).hexdigest(),
         "chunks": [{"items": r["manifest"]["items"], "dataset_sha256": r["manifest"]["dataset_sha256"]} for r in parsed],
         "split": None,  # 조각마다 split 이 달라도 전체 데이터셋 기준으로 집계한다(행의 split 필드 유지)
+        # 건수·라벨 상태는 첫 조각 값이 아니라 조각 합계다.
+        "items": sum(r["manifest"]["items"] for r in parsed),
+        "label_status": dict(sum((Counter(r["manifest"]["label_status"]) for r in parsed), Counter())),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     rows = [row for r in parsed for row in r["rows"]]
