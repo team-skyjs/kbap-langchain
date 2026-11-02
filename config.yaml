@@ -10,10 +10,18 @@ llm:
   # 8월 nano 실험에서 이름 정제만 품질 미달이었으니, 재발 시 namefix_model 부터 되돌린다.
   model: openai:gpt-6-luna # 검수 3종·기피성분 생성·(gen_model 미설정 시) 번역·설명 생성
   avoidance_model: openai:gpt-6-luna # 과도기 review 배치 전용 — 콘텐츠 그래프의 기피성분 노드는 model을 따른다. 과거 소형 모델이 후보 밖 코드를 반환한 사례가 있어 valid_substances 필터·검수가 방어선이다
-  judge_model: openai:gpt-6-luna # 종합판정 — 점수 요약 읽고 통과/탈락만 정하므로 저가 모델로 충분
   namefix_model: openai:gpt-6-luna # 이름 정제 — 모델 민감도가 가장 높은 노드(nano 는 오타 교정 실패)
   # gen_model: openai:gpt-5 # 번역·설명 생성만 상위 모델로 — 비용이 크게 늘므로 품질 미달이 데이터로 확인될 때만
   timeout_seconds: 120 # LLM 호출 타임아웃. 모델이 느려지면 이 값을 조정
+# 검수 3곳(이름·설명·기피성분) 엔진 — llm(기존) | jev(TypeSafe, 3곳 모두) | 노드별 "description=jev"(적지 않은 노드는 llm).
+# 환경변수 REVIEW_ENGINE 이 이긴다. jev 노드가 있으면 TYPESAFE_API_KEY 필요 — prod 에 키가 없어 기본값은 llm 으로 둔다.
+# 2026-10-31 결정(R-174): 설명만 Jev, 이름·기피성분은 llm — 함수 env 에 REVIEW_ENGINE=description=jev 로 켠다.
+review_engine: llm
+jev:
+  model: jev-1.14.0 # 버전 고정 — 별칭(jev-latest)은 바뀌면 A/B 재현이 깨진다
+  timeout_seconds: 10
+  max_attempts: 2 # timeout·429·5xx 공통(최초 포함). 그래프·SQS 재시도와 곱해지지 않게 여기 한 곳만
+  # policy: 확률 임계값 — 생략 시 kbap.jev.JevPolicy 기본값(보정 전). 조정용 데이터로 정해 여기 고정한다
 thresholds: # 필드군별 통과 임계값 — 운영 중 조정
   description: 70
   avoidance: 70

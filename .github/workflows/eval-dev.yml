@@ -24,6 +24,10 @@ on:
         type: choice
         options: [all, tune, final]
         default: all
+      nodes:
+        description: fixed 에서 볼 검수 노드(쉼표 목록 name,description,ingredients) — 나머지 입력은 비워 호출하지 않는다
+        required: false
+        default: name,description,ingredients
       chunk_size:
         description: invoke 1회당 항목 수(비우면 fixed 20 / pipeline 5 — 함수 Timeout 300s 기준)
         required: false
@@ -33,14 +37,9 @@ on:
         type: choice
         options: ["false", "true"]
         default: "false"
-      dataset_source:
-        description: repo = 이 레포의 dataset_path / spec = private kbap-spec 의 평가 데이터셋(real 데이터는 공개 레포에 두지 않는다)
-        type: choice
-        options: [repo, spec]
-        default: repo
       dataset_path:
-        description: dataset_source=repo 일 때 레포 안 데이터셋 경로
-        default: evals/decision/data/dataset.json
+        description: 레포 안 데이터셋 경로
+        default: evals/decision/data/dataset-manifest.json
 
 concurrency:
   group: deploy # 배포 중인 함수를 평가하지 않게 deploy 와 같은 그룹 — 순서대로 대기
@@ -50,7 +49,6 @@ concurrency:
 env:
   FUNCTION: kbap-generate-content # dev 전용, 하드코딩
   AWS_REGION: ap-northeast-2
-  SPEC_DATASET: reports/jev-decision-2026-10-30/dataset-manifest.json
 
 jobs:
   eval:
@@ -59,34 +57,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # dataset_source=spec — 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 그래서
-      # ① private kbap-spec 에서 데이터셋을 읽고 ② 결과는 암호화해서만 올린다. 시크릿이 없으면
-      # 유료 호출 전에 중단한다(SPEC_READ_TOKEN: kbap-spec contents:read, EVAL_RESULT_PASSPHRASE: 결과 암호).
-      - name: check spec secrets
-        if: inputs.dataset_source == 'spec'
+      # 이 레포는 public 이라 Actions 로그·artifact 도 공개된다. 데이터셋은 레포에 공개해 두었지만
+      # live 결과(실제 모델 출력·판정 행)는 암호화해서만 올린다 — 암호가 없으면 유료 호출 전에 중단한다.
+      # live=false 는 모의 응답뿐이라 암호가 없으면 평문으로 올린다.
+      - name: check result passphrase
         env:
-          HAS_TOKEN: ${{ secrets.SPEC_READ_TOKEN != '' }}
           HAS_PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE != '' }}
+          LIVE: ${{ inputs.live }}
         run: |
-          [ "$HAS_TOKEN" = true ] || { echo "::error::SPEC_READ_TOKEN 시크릿 없음 — kbap-spec contents:read fine-grained 토큰을 추가한다"; exit 1; }
-          [ "$HAS_PASS" = true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — public 레포 artifact 를 평문으로 올리지 않는다"; exit 1; }
-      - uses: actions/checkout@v4
-        if: inputs.dataset_source == 'spec'
-        with:
-          repository: team-skyjs/kbap-spec
-          ref: main
-          token: ${{ secrets.SPEC_READ_TOKEN }}
-          path: _spec
-          sparse-checkout: ${{ env.SPEC_DATASET }}
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
+          [ "$HAS_PASS" = true ] || [ "$LIVE" != true ] || { echo "::error::EVAL_RESULT_PASSPHRASE 시크릿 없음 — live 결과를 public 레포 artifact 에 평문으로 올리지 않는다"; exit 1; }
       - name: resolve dataset
         env:
-          SOURCE: ${{ inputs.dataset_source }}
-          REPO_PATH: ${{ inputs.dataset_path }}
+          f: ${{ inputs.dataset_path }}
         run: |
           set -euo pipefail
-          if [ "$SOURCE" = spec ]; then f="_spec/$SPEC_DATASET"; else f="$REPO_PATH"; fi
           [ -f "$f" ] || { echo "::error::데이터셋 없음: $f"; exit 1; }
           echo "DATASET=$f" >> "$GITHUB_ENV"
           echo "데이터셋: $f ($(jq '.items | length' "$f")건, $(jq -r .dataset_version "$f"))"
@@ -104,6 +88,8 @@ jobs:
       # ① 평가 플래그 — 없으면 켠다. 환경변수 맵은 통째로 교체되므로 기존 값을 읽어 병합한다.
       #    값(API 토큰·Jev 키)은 출력하지 않고 마스킹하며, ④의 유출 검사용으로 러너 임시 디렉터리에만 둔다.
       - name: enable eval flag on dev function
+        env:
+          LIVE: ${{ inputs.live }}
         run: |
           set -euo pipefail
           test "$FUNCTION" = kbap-generate-content
@@ -126,6 +112,12 @@ jobs:
             echo "KBAP_EVAL_ENABLED=true 반영(다른 변수 보존: $(jq 'length' "$env_json")개 키)"
           fi
           aws lambda get-function --function-name "$FUNCTION" --query 'Code.ImageUri' --output text
+          # live 는 유료 호출 전에 키 이름만 확인한다(값은 보지 않음) — 없으면 첫 조각에서 A 비용만 쓰고 B 가 죽는다.
+          if [ "$LIVE" = true ]; then
+            for k in OPENAI_API_KEY TYPESAFE_API_KEY; do
+              [ -n "$(jq -r --arg k "$k" '.[$k] // ""' "$env_json")" ] || { echo "::error::dev 함수 환경변수에 $k 없음"; exit 1; }
+            done
+          fi
 
       # ② 조각 invoke — 실패한 조각은 건너뛰고 끝에 목록을 남긴다.
       - name: invoke chunks
@@ -135,8 +127,12 @@ jobs:
           SPLIT: ${{ inputs.split }}
           CHUNK: ${{ inputs.chunk_size }}
           LIVE: ${{ inputs.live }}
+          NODES: ${{ inputs.nodes }}
+          # 누적 비용이 이 값을 넘으면 남은 조각을 돌리지 않는다. 단가는 kbap.evaluate.PRICES 와 같게.
+          MAX_USD: "1.5"
         run: |
           set -euo pipefail
+          spent=0
           size="${CHUNK:-}"
           [ -n "$size" ] || size=$([ "$MODE" = fixed ] && echo 20 || echo 5)
           [[ "$size" =~ ^[1-9][0-9]*$ ]] || { echo "chunk_size 는 양의 정수: $size" >&2; exit 1; }
@@ -144,8 +140,19 @@ jobs:
           sel='[.items[] | select($split == null or .split == $split)'
           sel+=$([ "$MODE" = pipeline ] && echo ' | select(.scanned_name != null)]' || echo ']')
           jq --argjson split "$split_json" "$sel" "$DATASET" > "$RUNNER_TEMP/items.json"
+          if [ "$MODE" = fixed ]; then
+            # 고르지 않은 노드의 입력을 null 로 — run_fixed 는 입력이 있는 노드만 돈다. 남은 입력이 없는 항목은 뺀다.
+            nodes_json=$(jq -cn --arg n "${NODES:-name,description,ingredients}" '$n | split(",") | map(gsub(" "; ""))')
+            jq -en --argjson n "$nodes_json" '($n | length > 0) and all($n[]; IN("name", "description", "ingredients"))' > /dev/null \
+              || { echo "nodes 는 name,description,ingredients 중에서: $NODES" >&2; exit 1; }
+            jq --argjson n "$nodes_json" '{name: "name_review", description: "description", ingredients: "ingredients"} as $f
+              | map(reduce ($f | to_entries[] | select(.key as $k | $n | index($k) | not) | .value) as $drop (.; .[$drop] = null)
+                    | select(.name_review != null or .description != null or .ingredients != null))' \
+              "$RUNNER_TEMP/items.json" > "$RUNNER_TEMP/items.sel.json"
+            mv "$RUNNER_TEMP/items.sel.json" "$RUNNER_TEMP/items.json"
+          fi
           total=$(jq length "$RUNNER_TEMP/items.json")
-          echo "항목 $total 개, 조각 크기 $size, live=$LIVE"
+          echo "항목 $total 개, 노드 ${NODES:-전체}, 조각 크기 $size, live=$LIVE"
           mkdir -p "$RUNNER_TEMP/resp"
           : > "$RUNNER_TEMP/failed.txt"
           i=0
@@ -161,7 +168,15 @@ jobs:
                  --query 'FunctionError' --output text > "$RUNNER_TEMP/fe.txt" \
                && [ "$(cat "$RUNNER_TEMP/fe.txt")" = None ] \
                && jq -e '.manifest and (.rows != null)' "$out" > /dev/null; then
-              echo "조각 $i 완료"
+              spent=$(jq -r --argjson prev "$spent" '$prev + ([.rows[] |
+                ((.llm_usage.input_tokens // 0) * 0.10 + (.llm_usage.output_tokens // 0) * 0.50
+                 + (.trace.usage.input_tokens // 0) * 0.042) / 1e6] | add // 0)' "$out")
+              echo "조각 $i 완료 — 누적 비용 \$$(printf %.4f "$spent")"
+              if jq -en --argjson s "$spent" --argjson m "$MAX_USD" '$s > $m' > /dev/null; then
+                echo "::error::누적 비용이 \$$MAX_USD 를 넘어 남은 조각을 중단(조각 $i 까지)"
+                echo "budget stop after $i" >> "$RUNNER_TEMP/failed.txt"
+                break
+              fi
             else
               # 본문은 출력하지 않는다(데이터셋 텍스트가 섞일 수 있고 public 레포 로그는 공개된다).
               echo "조각 $i 실패(시작 $start): $(jq -r '.errorType // (if .eval then "eval=\(.eval)" else "결과 없음" end)' "$out" 2>/dev/null || echo 응답 없음)"
@@ -186,7 +201,12 @@ jobs:
           resp=("$RUNNER_TEMP"/resp/*.json)
           if [ ${#resp[@]} -eq 0 ]; then echo "성공한 조각 없음"; exit 1; fi
           # 요약(지표표)만 잡 요약에 싣는다 — 행·불일치 목록은 artifact 로만.
-          uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" > /dev/null
+          # stderr 도 로그에 내보내지 않는다 — 예외 메시지(검증 오류 등)에 데이터셋 값이 실릴 수 있다. 실패하면 예외 유형만.
+          if ! uv run python evals/decision/run.py collect --dataset "$DATASET" --out "evals/decision/runs/$run_id" "${resp[@]}" \
+               > /dev/null 2> "$RUNNER_TEMP/collect.err"; then
+            echo "::error::collect 실패: $(grep -oE '^[A-Za-z_.]+(Error|Exception)\b' "$RUNNER_TEMP/collect.err" | tail -1 || echo 알 수 없음)"
+            exit 1
+          fi
           cat "evals/decision/runs/$run_id/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       # ④ 업로드 전 유출 검사 — 함수 환경변수 값(8자 이상)이 결과에 섞였으면 업로드하지 않는다.
@@ -201,13 +221,14 @@ jobs:
           rm -f "$RUNNER_TEMP/secrets.txt" "$RUNNER_TEMP/env.json"
           echo "유출 검사 통과"
 
-      # spec 데이터는 암호화해서만 올린다: gpg --decrypt <파일> | tar -xz
-      - name: encrypt results (spec)
-        if: inputs.dataset_source == 'spec'
+      # 암호가 있으면 암호화해서 올린다: gpg --decrypt <파일> | tar -xz
+      - name: encrypt results
         env:
           PASS: ${{ secrets.EVAL_RESULT_PASSPHRASE }}
         run: |
           set -euo pipefail
+          # 암호 없이 여기 오는 건 live=false 뿐이다(live=true 는 맨 앞에서 중단).
+          if [ -z "$PASS" ]; then echo "unencrypted (dry run)"; exit 0; fi
           tar -czf - -C "$RUN_DIR" . | gpg --batch --yes --symmetric --cipher-algo AES256 \
             --passphrase-fd 3 3<<<"$PASS" -o "$RUNNER_TEMP/results.tar.gz.gpg"
           rm -rf "$RUN_DIR" && mkdir -p "$RUN_DIR" && mv "$RUNNER_TEMP/results.tar.gz.gpg" "$RUN_DIR/"

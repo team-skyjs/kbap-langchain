@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from kbap.content import (
     VALID_CODES,
     ContentFns,
-    DESC_PASS_SCORE,
     DescGen,
     DescReview,
     IngredientsReview,
@@ -72,14 +71,6 @@ def build_fns(rec, name_review_seq=(True,), description_seq=(3,), ingredient_seq
         passed = ingredient_results.pop(0)
         return IngredientsReview(reason=f"기피 {'통과' if passed else '불통과'}", passed=passed)
 
-    async def judge(state):
-        rec["judge"].append(state)
-        passed = (
-            state["description_score"].score >= DESC_PASS_SCORE
-            and state["ingredient_review"].passed
-        )
-        return JudgeVerdict(reason="종합", passed=passed, rejected_fields=[])
-
     return ContentFns(
         clean_name=clean_name,
         review_name=review_name,
@@ -90,7 +81,6 @@ def build_fns(rec, name_review_seq=(True,), description_seq=(3,), ingredient_seq
         generate_long_description=generate_long_description,
         review_description=review_description,
         review_ingredients=review_ingredients,
-        judge=judge,
     )
 
 
@@ -110,28 +100,60 @@ async def test_happy_path_populates_all_content():
     assert state["ingredients"]["spiciness"] == 3
     assert state["long_description"].startswith("돼지고기와 신김치")
     assert state["verdict"].passed is True
-    # 생성은 각각 한 번, 종합 판정은 join 후 정확히 한 번 실행한다
+    # 생성은 각각 한 번 실행한다
     assert len(rec["generate_description"]) == 1
     assert len(rec["generate_long_description"]) == 1
-    assert len(rec["judge"]) == 1
     # 이름 번역은 검수 없이 1회 생성 — 9키 전수는 pydantic(Translations)이 보장한다
     assert rec["gen_nt"] == ["김치찌개"]
 
 
-async def test_failed_ingredient_review_fails_even_if_judge_passes():
-    # 안전 fail-closed: LLM judge가 통과를 줘도 기피성분 검수 불통과면 코드가 탈락시킨다.
+def counting_fns(calls):
+    """build_fns 의 모든 노드 함수를 감싸 LLM 콜 수를 센다 — ContentFns 의 필드 하나가 LLM 콜 하나다."""
+    fns = build_fns(defaultdict(list))
+
+    def wrap(name, fn):
+        async def counted(*args):
+            calls[name] += 1
+            return await fn(*args)
+
+        return counted
+
+    return ContentFns(*(wrap(n, f) for n, f in zip(ContentFns._fields, fns)))
+
+
+async def test_default_run_makes_exactly_nine_llm_calls():
+    # KB-897: judge 를 규칙으로 바꿔 기본(재시도 없는) 1건 = LLM 9콜. 콜이 늘면 비용 표도 고쳐야 한다.
+    calls = defaultdict(int)
+    state = await build_content_graph(counting_fns(calls)).ainvoke({"food_name": "김치찌개"})
+
+    assert state["verdict"].passed is True
+    assert sum(calls.values()) == 9
+    assert set(calls) == set(ContentFns._fields)  # 9개 노드 함수가 각각 정확히 1회
+    assert all(n == 1 for n in calls.values())
+
+
+@pytest.mark.parametrize(
+    "description_seq, ingredient_seq, passed, kind, rejected",
+    [
+        ((3,), (True,), True, None, []),
+        ((2, 2), (True,), False, "JUDGE_REJECTED", ["description"]),
+        ((3,), (False, False), False, "INGREDIENT_GUARD", ["avoidance"]),
+        # 둘 다 미달이면 안전 쪽(기피성분)이 failureKind 를 가진다 — 사유는 둘 다 남긴다.
+        ((2, 2), (False, False), False, "INGREDIENT_GUARD", ["avoidance", "description"]),
+    ],
+)
+async def test_judge_rule(description_seq, ingredient_seq, passed, kind, rejected):
+    # 통과 = 설명 3점 AND 기피성분 검수 통과. LLM 판정 없이 코드가 확정한다(KB-897).
     rec = defaultdict(list)
+    verdict = (await run(rec, description_seq=description_seq, ingredient_seq=ingredient_seq))["verdict"]
 
-    async def lenient_judge(state):
-        return JudgeVerdict(reason="관대한 판정", passed=True, rejected_fields=[])
-
-    fns = build_fns(rec, ingredient_seq=(False, False))._replace(judge=lenient_judge)
-    graph = build_content_graph(fns)
-    state = await graph.ainvoke({"food_name": "김치찌개"})
-
-    assert state["verdict"].passed is False
-    assert state["verdict"].rejected_fields == ["avoidance"]
-    assert state["verdict"].failure_kind == "INGREDIENT_GUARD"
+    assert verdict.passed is passed
+    assert verdict.failure_kind == kind
+    assert verdict.rejected_fields == rejected
+    if "avoidance" in rejected:
+        assert "기피 불통과" in verdict.reason
+    if "description" in rejected:
+        assert "설명 2" in verdict.reason
 
 
 async def test_non_food_ends_graph_without_generation_or_retry():
@@ -155,7 +177,6 @@ async def test_non_food_ends_graph_without_generation_or_retry():
     assert rec["generate_description"] == []
     assert rec["generate_ingredients"] == []
     assert rec["generate_long_description"] == []
-    assert rec["judge"] == []  # LLM 종합 판정도 건너뛴다
 
 
 async def test_name_review_fail_retries_clean_with_feedback():
@@ -180,7 +201,6 @@ async def test_name_review_exhausted_rejects_as_not_food():
     assert state["verdict"].passed is False
     assert state["verdict"].failure_kind == "NOT_FOOD"
     assert rec["gen_nt"] == []
-    assert rec["judge"] == []
 
 
 async def test_generators_receive_cleaned_name():
@@ -204,7 +224,6 @@ async def test_review_fail_retries_generation_once_with_feedback():
     assert len(rec["generate_description_translations"]) == 1
     assert state["description_attempts"] == 2
     assert state["verdict"].passed is True
-    assert len(rec["judge"]) == 1
 
 
 async def test_retry_exhausted_flows_failure_to_judge():
@@ -213,16 +232,12 @@ async def test_retry_exhausted_flows_failure_to_judge():
 
     # 한 번만 재시도해 총 생성 횟수가 2회를 넘지 않는다.
     assert len(rec["generate_description"]) == 2
-    # 재시도 소진 후에도 번역은 1회 생성해 judge 로 간다 (judge 가 통과시키면 payload 에 필요).
+    # 재시도 소진 후에도 번역은 1회 생성해 judge 로 간다.
     assert len(rec["generate_description_translations"]) == 1
-    assert len(rec["judge"]) == 1
-    # 종합 판정에는 실패 점수와 사유를 그대로 전달한다.
-    judged = rec["judge"][0]
-    assert judged["description_score"].score == 2
-    assert judged["description_feedback"] == "설명 2"
+    # 판정 사유에 마지막 검수 사유가 그대로 남아 관리자가 열람한다.
     assert state["verdict"].passed is False
-    # LLM judge 가 failure_kind 를 안 채워도(테스트 fns 처럼) 노드 코드가 확정적으로 찍는다.
     assert state["verdict"].failure_kind == "JUDGE_REJECTED"
+    assert "설명 2" in state["verdict"].reason
 
 
 async def test_independent_branches_do_not_retry_each_other():
@@ -288,10 +303,11 @@ def test_ingest_payload_failed_sends_kind_and_reason_only():
 # ===== 기피성분 후보 필터 =====
 
 
-def test_valid_codes_covers_all_81_candidates():
-    assert len(VALID_CODES) == 81
-    assert "PORK" in VALID_CODES
-    assert "SALTED_SHRIMP" in VALID_CODES
+def test_valid_codes_covers_all_84_candidates():
+    # 서버 IngredientCode 말단 코드와 일치(KB-897) — 묶음 NUTS·CRUSTACEAN·MOLLUSK·MEAT 는 서버 함의라 제외.
+    assert len(VALID_CODES) == 84
+    assert {"PORK", "SALTED_SHRIMP", "LAMB", "MEAT_BROTH", "CORIANDER"} <= VALID_CODES
+    assert not {"NUTS", "CRUSTACEAN", "MOLLUSK", "MEAT"} & VALID_CODES
 
 
 def test_valid_substances_drops_out_of_candidate_codes():

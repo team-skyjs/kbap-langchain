@@ -16,17 +16,18 @@ outboxId 로 조건부 UPDATE 게이트). 없으면 계약 위반으로 DLQ 행�
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
 from collections.abc import Awaitable, Callable
-from typing import NamedTuple, TypedDict
+from typing import Annotated, NamedTuple, TypedDict
 import asyncio
 import json
 import logging
+import operator
 import os
 import re
 import yaml
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from kbap.review import DuplicateIngestError
 
@@ -38,7 +39,6 @@ from kbap.prompts import (
     DESC_TR_TEMPLATE,
     LONG_DESC_TEMPLATE,
     NAME_REVIEW_TEMPLATE,
-    JUDGE_TEMPLATE,
     NAME_TR_TEMPLATE,
     render_prompt,
 )
@@ -52,7 +52,13 @@ from kbap.review import (
 
 # is_food 를 passed 와 분리한 이유: 비음식은 재정제해도 음식이 안 되므로
 # 재정제 루프 없이 즉시 종료해 콜을 아낀다.
-class NameReview(BaseModel):
+class _Traced(BaseModel):
+    # 검수 엔진의 판정 근거(확률 원본·사유 코드·버전·사용량·지연·대체 여부) — KB-913.
+    # PrivateAttr 라 structured output 스키마와 적재 payload 에 나가지 않는다. LLM 엔진은 비워 둔다.
+    _trace: dict | None = PrivateAttr(default=None)
+
+
+class NameReview(_Traced):
     reason: str
     is_food: bool
     passed: bool
@@ -62,12 +68,12 @@ class NameReview(BaseModel):
 DESC_PASS_SCORE = 3
 
 
-class DescReview(BaseModel):
+class DescReview(_Traced):
     reason: str
     score: int = Field(ge=1, le=3)
 
 
-class IngredientsReview(BaseModel):
+class IngredientsReview(_Traced):
     reason: str
     passed: bool
 
@@ -76,8 +82,8 @@ class JudgeVerdict(BaseModel):
     reason: str
     passed: bool
     rejected_fields: list[str] = []
-    # kbap 적재 계약의 failureKind — LLM 출력이 아니라 세 생성 지점의 코드가 찍는다.
-    # (정제 조기 종료→NOT_FOOD, 기피성분 가드→INGREDIENT_GUARD, 그 외 judge 탈락→JUDGE_REJECTED)
+    # kbap 적재 계약의 failureKind — 두 생성 지점의 코드가 찍는다.
+    # (정제 조기 종료→NOT_FOOD, judge 규칙: 기피성분 불통과→INGREDIENT_GUARD, 설명 미달→JUDGE_REJECTED)
     failure_kind: str | None = None
 
 
@@ -91,7 +97,6 @@ class ContentFns(NamedTuple):
     generate_long_description: Callable[[str], Awaitable[str]]
     review_description: Callable[[str, str], Awaitable[DescReview]]  # 한국어 설명만 검수
     review_ingredients: Callable[[str, dict], Awaitable[IngredientsReview]]
-    judge: Callable[[dict], Awaitable[JudgeVerdict]]
 
 
 class ContentState(TypedDict, total=False):
@@ -113,6 +118,13 @@ class ContentState(TypedDict, total=False):
     ingredient_feedback: str
     long_description: str  # 벡터 검색 메타데이터 (화면 미노출)
     verdict: JudgeVerdict
+    review_traces: Annotated[list[dict], operator.add]  # 검수 엔진 판정 근거 — 평가·관측용, payload 미포함
+
+
+def _traced(review: _Traced, update: dict) -> dict:
+    if review._trace:
+        update["review_traces"] = [review._trace]
+    return update
 
 
 def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempts: int = 3):
@@ -132,7 +144,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 여기를 통과해야만 생성 분기가 시작된다.
     async def review_name(state: ContentState):
         r = await fns.review_name(state["food_name"], state["cleaned_name"])
-        return {"name_review": r, "name_feedback": r.reason}
+        return _traced(r, {"name_review": r, "name_feedback": r.reason})
 
     # 비음식·재정제 소진 — NOT_FOOD verdict 를 만들고 그래프를 끝내 생성·검수 콜을 아낀다.
     async def reject_name(state: ContentState):
@@ -172,7 +184,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 설명 검수 — 한국어 설명만 본다. 번역보다 먼저 실행해 탈락한 설명의 번역을 만들지 않는다.
     async def review_description(state: ContentState):
         score = await fns.review_description(state["cleaned_name"], state["description"])
-        return {"description_score": score, "description_feedback": score.reason}
+        return _traced(score, {"description_score": score, "description_feedback": score.reason})
 
     # 설명 번역 생성(분기 2 후속) — 확정된 설명으로 1회만
     async def generate_description_translations(state: ContentState):
@@ -187,7 +199,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 기피성분·매운맛 검수(분기 3 후속) — 불통과면 재생성
     async def review_ingredients(state: ContentState):
         r = await fns.review_ingredients(state["cleaned_name"], state["ingredients"])
-        return {"ingredient_review": r, "ingredient_feedback": r.reason}
+        return _traced(r, {"ingredient_review": r, "ingredient_feedback": r.reason})
 
     # ④' 검색용 긴 설명(분기 4) — 벡터 DB 메타데이터. 안전 직결이 아니라 검수·judge 판정에
     # 참여하지 않는다. 검색 품질 문제가 실측되면 그때 검수를 붙인다.
@@ -195,22 +207,24 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         text = await fns.generate_long_description(state["cleaned_name"])
         return {"long_description": text}
 
-    # ⑤ 종합 판정 — 분기가 모두 끝난 뒤(defer) 검수 결과·사유로 PASS/FAIL을 최종 결정한다.
-    # 기피성분만은 결정론적 fail-closed: 프롬프트의 "불통과는 탈락" 지시는 강제력이
-    # 없고, 알레르기 데이터는 오통과가 누락보다 위험하다(valid_substances 필터와 같은 철학).
-    async def judge(state: ContentState):
-        verdict = await fns.judge(dict(state))
-        if not verdict.passed:
-            # LLM 출력의 failure_kind 는 신뢰하지 않고 덮어쓴다 — 계약 밖 enum 값 차단.
-            verdict = verdict.model_copy(update={"failure_kind": "JUDGE_REJECTED"})
-        ingredient = state["ingredient_review"]
-        if verdict.passed and not ingredient.passed:
-            verdict = JudgeVerdict(
-                passed=False,
-                reason=f"기피성분 검수 불통과: {ingredient.reason}",
-                rejected_fields=["avoidance"],
-                failure_kind="INGREDIENT_GUARD",
-            )
+    # ⑤ 종합 판정 — 분기가 모두 끝난 뒤(defer) 규칙으로 PASS/FAIL을 정한다(LLM 없음, KB-897).
+    # 입력이 설명 점수·기피성분 통과 여부 둘뿐이라 LLM 판정은 규칙을 흔들 뿐이었다(2점도 통과 가능).
+    # 둘 다 미달이면 INGREDIENT_GUARD 가 이긴다 — 알레르기 데이터는 오통과가 누락보다 위험하다.
+    def judge(state: ContentState):
+        desc, ingredient = state["description_score"], state["ingredient_review"]
+        rejected, reasons = [], []
+        if not ingredient.passed:
+            rejected.append("avoidance")
+            reasons.append(f"기피성분 검수 불통과: {ingredient.reason}")
+        if desc.score < DESC_PASS_SCORE:
+            rejected.append("description")
+            reasons.append(f"설명 {desc.score}/{DESC_PASS_SCORE}점: {desc.reason}")
+        if not rejected:
+            return {"verdict": JudgeVerdict(reason="설명 3점·기피성분 검수 통과", passed=True)}
+        kind = "INGREDIENT_GUARD" if "avoidance" in rejected else "JUDGE_REJECTED"
+        verdict = JudgeVerdict(
+            reason=" / ".join(reasons), passed=False, rejected_fields=rejected, failure_kind=kind
+        )
         return {"verdict": verdict}
 
     # 설명은 3점 만점(DESC_PASS_SCORE)만 통과, 기피성분은 통과/불통과 — 미달이면 1회 재생성.
@@ -226,7 +240,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
             return "generate_ingredients"
         return "judge"
 
-    # structured output 파싱 실패 시 재시도 — kbap_review.graph와 같은 이유이며 모두 LLM 노드다.
+    # structured output 파싱 실패 시 재시도 — kbap_review.graph와 같은 이유. judge·reject_name 외엔 모두 LLM 노드다.
     retry = RetryPolicy(max_attempts=2, retry_on=_retryable)
     g = StateGraph(ContentState)
     g.add_node("clean_name", clean_name, retry_policy=retry)
@@ -239,8 +253,8 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     g.add_node("generate_ingredients", generate_ingredients, retry_policy=retry)
     g.add_node("review_ingredients", review_ingredients, retry_policy=retry)
     g.add_node("generate_long_description", generate_long_description, retry_policy=retry)
-    # defer=True — 세 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다.
-    g.add_node("judge", judge, defer=True, retry_policy=retry)
+    # defer=True — 네 분기의 재시도 횟수가 달라도 모두 끝난 뒤 정확히 한 번 실행된다. LLM 없음 — 재시도 불필요.
+    g.add_node("judge", judge, defer=True)
 
     g.add_edge(START, "clean_name")
     g.add_edge("clean_name", "review_name")
@@ -445,34 +459,17 @@ def ingredients_review_prompt(name: str, ingredients: dict) -> str:
     )
 
 
-def judge_prompt(state: dict) -> str:
-    # 조건·반복이 있는 부분은 코드에서 미리 계산해 변수로 넣는다 — Langfuse 템플릿엔 로직이 없다.
-    desc = state["description_score"]
-    ingredient = state["ingredient_review"]
-    lines = "\n".join(
-        [
-            f"- 설명: {desc.score}/3점 — {desc.reason}",
-            f"- 기피성분·매운맛: {'통과' if ingredient.passed else '불통과'} — {ingredient.reason}",
-        ]
-    )
-    return render_prompt(
-        "food-judge", JUDGE_TEMPLATE, name=state["cleaned_name"], score_lines=lines
-    )
-
-
 def make_fns(
     model: str,
     timeout: int,
-    judge_model: str | None = None,
     gen_model: str | None = None,
     namefix_model: str | None = None,
     callbacks: list = [],
 ):
     """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다.
 
-    역할별 모델 분리: judge 는 짧은 점수 요약을 읽고 통과/탈락만 정하므로 저렴한 모델로
-    내릴 수 있고(judge_model), 이름 정제는 _plausible·길이 방어선이 있어 실패해도 원본
-    유지로 끝나므로 역시 내릴 수 있다(namefix_model). 품질이 곧 결과물인 번역·설명 생성만
+    역할별 모델 분리: 이름 정제는 _plausible·길이 방어선이 있어 실패해도 원본
+    유지로 끝나므로 저렴한 모델로 내릴 수 있다(namefix_model). 품질이 곧 결과물인 번역·설명 생성만
     올릴 수 있다(gen_model). 기피성분 생성·검수는 안전 데이터라 기본 모델(model)을 유지한다.
 
     callbacks 는 노드를 그래프 밖에서 직접 호출할 때(노트북) 트레이싱용이다.
@@ -486,7 +483,6 @@ def make_fns(
 
     base = init_model(model, timeout)
     gen_base = init_model(gen_model, timeout) if gen_model and gen_model != model else base
-    judge_llm = _bind(init_model(judge_model or model, timeout).with_structured_output(JudgeVerdict))
     tr_llm = _bind(gen_base.with_structured_output(Translations))
     desc_llm = _bind(gen_base.with_structured_output(DescGen))
     long_desc_llm = _bind(gen_base.with_structured_output(LongDescGen))
@@ -498,8 +494,7 @@ def make_fns(
     normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
     async def clean_name(name: str, feedback: str) -> dict:
-        # ponytail: 앵커 없이 시작 — 수집 데이터가 쌓이면 확정된 음식명을 앵커로 주입
-        return await clean_one(name, [], normalize, feedback)
+        return await clean_one(name, normalize, feedback)
 
     async def review_name(original: str, cleaned: str) -> NameReview:
         return await name_review_llm.ainvoke(name_review_prompt(original, cleaned))
@@ -535,9 +530,6 @@ def make_fns(
     async def review_ingredients(name: str, ingredients: dict) -> IngredientsReview:
         return await ingredients_review_llm.ainvoke(ingredients_review_prompt(name, ingredients))
 
-    async def judge(state: dict) -> JudgeVerdict:
-        return await judge_llm.ainvoke(judge_prompt(state))
-
     return ContentFns(
         clean_name=clean_name,
         review_name=review_name,
@@ -548,7 +540,6 @@ def make_fns(
         generate_long_description=generate_long_description,
         review_description=review_description,
         review_ingredients=review_ingredients,
-        judge=judge,
     )
 
 
@@ -572,11 +563,45 @@ def load_graph(config_path: str | None = None):
     fns = make_fns(
         llm["model"],
         llm.get("timeout_seconds", 120),
-        judge_model=llm.get("judge_model"),
         gen_model=llm.get("gen_model"),
         namefix_model=llm.get("namefix_model"),
     )
-    return build_content_graph(fns)
+    return build_content_graph(apply_review_engine(fns, raw))
+
+
+REVIEW_NODES = ("name", "description", "ingredients")
+
+
+def parse_review_engine(spec: str) -> dict[str, str]:
+    """`llm` | `jev`(3곳 모두) | `description=jev,name=llm` 처럼 노드별 — 적지 않은 노드는 llm."""
+    if spec in ("llm", "jev"):
+        return dict.fromkeys(REVIEW_NODES, spec)
+    out = dict.fromkeys(REVIEW_NODES, "llm")
+    for part in spec.split(","):
+        node, _, engine = part.strip().partition("=")
+        if node not in out or engine not in ("llm", "jev"):
+            raise ValueError(f"review_engine 은 llm|jev 또는 name|description|ingredients=llm|jev 목록: {spec!r}")
+        out[node] = engine
+    return out
+
+
+def apply_review_engine(fns: ContentFns, raw: dict, engine: str | None = None) -> ContentFns:
+    """검수 3곳의 엔진을 노드별로 고른다(KB-913). 기본 llm — 생성 함수와 호출 수는 그대로다.
+
+    환경변수 REVIEW_ENGINE 이 config 의 review_engine 을 이긴다 — dev·prod 가 같은 이미지라
+    함수마다 따로 켤 수 있어야 한다. jev 노드가 하나라도 있는데 TYPESAFE_API_KEY 가 없으면 콜드 스타트에서
+    죽는다(조용히 llm 으로 돌면 실험군이 섞인다). 기본값을 llm 으로 두는 이유도 같다 — prod 에는 키가 없다.
+    """
+    engines = parse_review_engine(engine or os.environ.get("REVIEW_ENGINE") or raw.get("review_engine", "llm"))
+    jev_nodes = [n for n, e in engines.items() if e == "jev"]
+    if not jev_nodes:
+        return fns
+    from kbap.jev import JevPolicy, JevReviews, JevSettings, with_jev_reviews
+
+    jev = dict(raw.get("jev") or {})
+    policy = JevPolicy(**jev.pop("policy", {}))
+    settings = JevSettings(api_key=os.environ["TYPESAFE_API_KEY"], **jev)
+    return with_jev_reviews(fns, JevReviews(settings, fns, policy), jev_nodes)
 
 
 _graph = None
@@ -690,6 +715,12 @@ async def _consume(event, graph, concurrency: int, callbacks: list) -> list[str]
 
 
 def handler(event, context):
+    # 평가 이벤트는 Records 없이 최상위 eval 키 — SQS 메시지와 섞이지 않는다(KB-913).
+    # KBAP_EVAL_ENABLED=true 인 함수(dev)에서만 돌고, 적재·SQS 응답이 없다.
+    if "eval" in event and "Records" not in event:
+        from kbap.evaluate import lambda_eval
+
+        return lambda_eval(event["eval"])
     graph = _cached_graph()
     concurrency = int(os.environ.get("GRAPH_CONCURRENCY", "20"))
     failed = asyncio.run(_consume(event, graph, concurrency, make_callbacks()))
