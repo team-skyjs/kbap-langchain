@@ -19,6 +19,7 @@ from kbap.content import (
     Translations,
     build_content_graph,
     build_ingest_payload,
+    fix_ramyeon,
     process_event,
     valid_substances,
 )
@@ -554,3 +555,36 @@ async def test_malformed_body_is_reported_as_failure():
     assert failures == ["bad"]
     assert graph.calls == []
     assert kbap.posts == []
+
+
+# ===== 라면 표기 (KB-961) =====
+
+
+@pytest.mark.parametrize(
+    "name, tr, expected",
+    [
+        ("김치라면", {"en": "Kimchi Ramen", "es": "ramen de kimchi", "ja": "キムチラーメン"},
+         {"en": "Kimchi Ramyeon", "es": "ramyeon de kimchi", "ja": "キムチラーメン"}),  # 라틴 문자만
+        ("라면사리", {"en": "RAMEN Noodles", "vi": "Mì Ramen"}, {"en": "RAMYEON Noodles", "vi": "Mì Ramyeon"}),
+        ("미소라멘", {"en": "Miso Ramen"}, {"en": "Miso Ramen"}),  # 원문에 '라멘'이 있으면 그대로
+        ("돈코츠", {"en": "Tonkotsu Ramen"}, {"en": "Tonkotsu Ramen"}),  # 라면·라멘 둘 다 없는 일식 이름은 그대로
+        ("신라면", {"en": "Shin Ramen", "id": "Ramenan"}, {"en": "Shin Ramyeon", "id": "Ramenan"}),  # 단어 경계
+    ],
+)
+def test_korean_ramyeon_is_not_ramen(name, tr, expected):
+    assert fix_ramyeon(name, tr) == expected
+
+
+async def test_graph_normalizes_ramen_in_name_translations():
+    # 프롬프트(Langfuse)가 규칙을 어겨도 적재되는 이름 번역은 고쳐진다.
+    fns = build_fns(defaultdict(list))
+
+    async def clean_name(name, feedback):
+        return {"name": "김치라면", "reason": "그대로"}
+
+    async def generate_name_translations(name):
+        return {"en": "Kimchi Ramen"}
+
+    graph = build_content_graph(fns._replace(clean_name=clean_name, generate_name_translations=generate_name_translations))
+    state = await graph.ainvoke({"food_name": "김치라면"})
+    assert state["name_translations"] == {"en": "Kimchi Ramyeon"}

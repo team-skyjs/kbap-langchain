@@ -174,7 +174,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # ② 이름 번역 생성(분기 1) — 9개 언어, 검수 없이 1회. 9키 전수·빈 값 금지는 pydantic이 보장한다.
     async def generate_name_translations(state: ContentState):
         tr = await fns.generate_name_translations(state["cleaned_name"])
-        return {"name_translations": tr}
+        return {"name_translations": fix_ramyeon(state["cleaned_name"], tr)}
 
     # ③ 한국어 설명 생성(분기 2 시작) — 한 문장, 255자 이하
     async def generate_description(state: ContentState):
@@ -602,6 +602,27 @@ def apply_review_engine(fns: ContentFns, raw: dict, engine: str | None = None) -
     policy = JevPolicy(**jev.pop("policy", {}))
     settings = JevSettings(api_key=os.environ["TYPESAFE_API_KEY"], **jev)
     return with_jev_reviews(fns, JevReviews(settings, fns, policy), jev_nodes)
+
+
+# 한국 라면의 라틴 문자 표기는 Ramyeon — Ramen 은 일본식 라멘에만 쓴다(KB-961, 2026-11-02).
+# 이름에 '라면'이 있고 '라멘'이 없을 때만 고친다 — 돈코츠처럼 둘 다 없는 일식 이름의 Ramen 은 그대로 둔다.
+# 프롬프트에도 적었지만 운영 프롬프트는 Langfuse 가 이긴다 — 코드에서 출력을 한 번 더 고친다.
+LATIN_LANGS = ("en", "vi", "id", "es")
+_RAMEN = re.compile(r"\bramen\b", re.IGNORECASE)
+
+
+def _ramyeon(m: re.Match) -> str:
+    w = m.group()
+    return "RAMYEON" if w.isupper() else "Ramyeon" if w[0].isupper() else "ramyeon"
+
+
+def fix_ramyeon(name: str, translations: dict[str, str]) -> dict[str, str]:
+    if "라면" not in name or "라멘" in name:
+        return translations
+    fixed = {lang: _RAMEN.sub(_ramyeon, t) if lang in LATIN_LANGS else t for lang, t in translations.items()}
+    if fixed != translations:
+        log.info("이름 번역 Ramen → Ramyeon 정규화 (%s)", name)
+    return fixed
 
 
 _graph = None
