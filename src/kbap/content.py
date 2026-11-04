@@ -442,8 +442,10 @@ def valid_substances(items: list[dict]) -> list[dict]:
 MAX_REJECTION_REASON = 1000
 REJECTION_RETRIES = 1  # 지목어가 남았을 때 재정제 횟수
 _QUOTE = "'\"‘’“”"
+# 동사 바로 뒤의 부정("제거하지 마세요"·"삭제 금지"·"빼면 안 됨")은 보존 지시라 뽑지 않는다 — 다음 따옴표·구두점 전까지만 본다.
 _REMOVAL = re.compile(
     rf"[{_QUOTE}]([^{_QUOTE}]{{1,30}})[{_QUOTE}]\s*(?:을|를|은|는|도)?\s*(?:꼭|반드시)?\s*(?:제거|삭제|빼|떼|없애|지우|지워)"
+    rf"(?![^{_QUOTE},.\n]{{0,8}}(?:지\s*마|지\s*말|금지|면\s*안|않))"
 )
 
 
