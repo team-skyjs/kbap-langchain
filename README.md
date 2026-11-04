@@ -38,6 +38,11 @@ flowchart TD
   `INGREDIENT_GUARD`가 이긴다 — 알레르기 데이터는 오통과가 누락보다 위험하다.
 - 재시도 후에도 실패한 분기는 사유를 그대로 안고 판정까지 흘러가 관리자가 열람한다.
   탈락 사유는 `failureKind`(NOT_FOOD / INGREDIENT_GUARD / JUDGE_REJECTED)로 구분된다.
+- **운영자 반려 사유(KB-996).** 재수집 메시지의 `rejectionReason`(선택, 최대 1000자)을 정제·설명·
+  기피성분 생성 프롬프트의 피드백 자리에 넣는다(Langfuse 템플릿의 `{{feedback_block}}` 그대로).
+  따옴표로 지목한 제거 지시(`식당명 '설화' 제거`)만 규칙으로 확인한다 — 지목어는 정제 전에 원본에서 빼고,
+  정제된 이름에 남으면 재정제 1회, 그래도 남으면 생성 없이 `JUDGE_REJECTED`("반려 사유 미충족").
+  설명에 남으면 설명 재생성(기존 1회 한도) 뒤 judge 가 같은 사유로 반려한다. 사유가 없으면 동작은 전과 같다.
 
 LLM 호출 수(음식 1건):
 
@@ -47,6 +52,10 @@ LLM 호출 수(음식 1건):
 | 설명 재생성 / 기피성분 재생성 1회당 | +2 |
 | 이름 재정제 1회당 (최대 2회) | +2 |
 | 비음식(NOT_FOOD) 조기 종료 | 2 |
+| 반려 사유 있음 — 프롬프트 주입만 | +0 |
+| 반려 사유 지목어가 이름에 남음 → 재정제 1회 | +2 |
+| 재정제 뒤에도 남음 → 생성 없이 반려 | 4 |
+| 지목어가 설명에 남음 → 설명 재생성 | +2(설명 재생성과 같은 1회 한도) |
 
 기본 9회는 `test_default_run_makes_exactly_nine_llm_calls`가 잠근다. structured output 파싱 실패 재시도(RetryPolicy)는 별도다.
 
@@ -119,8 +128,9 @@ prod 큐 `kbap-prod-generate-content-queue` 트리거는 2026-09-14 에 붙였�
 
 롤백: `aws lambda update-function-code --function-name <fn> --image-uri 118178010621.dkr.ecr.ap-northeast-2.amazonaws.com/kbap/langchain:<이전 sha> --region ap-northeast-2`
 SQS 트리거는 batchSize 10 · ReportBatchItemFailures · maxConcurrency 로 RPM을 제어한다.
-메시지 계약: `{"scannedName": <str>, "foodId": <int>, "outboxId": <int>}` — foodId·outboxId 는
+메시지 계약: `{"scannedName": <str>, "foodId": <int>, "outboxId": <int>, "rejectionReason": <str|null>}` — foodId·outboxId 는
 필수(양수)이며 적재 API 본문에 그대로 왕복된다. 위반 메시지는 그래프 실행 없이 DLQ 행.
+`rejectionReason` 은 선택이다. 문자열이 아니면 버리고 재생성은 한다(사유 때문에 재수집을 잃지 않게).
 
 ## 운영 메모
 

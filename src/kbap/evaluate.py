@@ -73,6 +73,7 @@ class Item(BaseModel):
     split: Literal["tune", "final"]
     source: Literal["real", "synthetic"]  # 실제 사례와 인공 오류를 섞은 평균을 운영 정확도로 읽지 않는다
     scanned_name: str | None = None  # pipeline 입력
+    rejection_reason: str | None = None  # pipeline 입력 — 운영자 반려 사유(KB-996)
     name_review: NameInput | None = None
     description: DescInput | None = None
     ingredients: IngredientsInput | None = None
@@ -346,18 +347,19 @@ def counting(fns: ContentFns, counts: dict) -> ContentFns:
 
 
 async def run_pipeline(ds: Dataset, engines: dict, concurrency: int) -> list[dict]:
-    names = list(dict.fromkeys(i.scanned_name for i in ds.items if i.scanned_name))
+    inputs = list(dict.fromkeys((i.scanned_name, i.rejection_reason) for i in ds.items if i.scanned_name))
     sem = asyncio.Semaphore(concurrency)
 
-    async def one(idx: int, name: str, engine: str) -> dict:
+    async def one(idx: int, name_reason: tuple, engine: str) -> dict:
+        name, reason = name_reason
         counts: dict = defaultdict(int)
         fns, reviews = engines[engine]()
         graph = build_content_graph(counting(fns, counts))
-        row = {"scanned_name": name, "engine": engine, "order": idx % 2}
+        row = {"scanned_name": name, "rejection_reason": reason, "engine": engine, "order": idx % 2}
         async with sem:
             started = time.monotonic()
             try:
-                s = await graph.ainvoke({"food_name": name})
+                s = await graph.ainvoke({"food_name": name} | ({"rejection_reason": reason} if reason else {}))
                 v = s["verdict"]
                 row.update(
                     passed=v.passed,
@@ -378,9 +380,9 @@ async def run_pipeline(ds: Dataset, engines: dict, concurrency: int) -> list[dic
 
     started = time.monotonic()
     jobs = []
-    for idx, name in enumerate(names):
+    for idx, name_reason in enumerate(inputs):
         order = [e for e in (("A", "B") if idx % 2 == 0 else ("B", "A")) if e in engines]
-        jobs += [one(idx, name, e) for e in order]
+        jobs += [one(idx, name_reason, e) for e in order]
     rows = await asyncio.gather(*jobs)
     wall = time.monotonic() - started
     for r in rows:
