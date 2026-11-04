@@ -617,6 +617,27 @@ def test_removal_terms_only_quoted_with_removal_verb(reason, terms):
     assert removal_terms(reason) == terms
 
 
+@pytest.mark.parametrize(
+    "reason, name_terms",
+    [
+        ("설명에서 '매운' 삭제, 음식명은 유지", []),  # 설명 전용 — 이름(매운갈비찜)은 건드리지 않는다(Codex #21)
+        ("이름에서 '설화' 제거, 설명에서 '매운' 삭제", ["설화"]),
+        (SEOLHWA, ["설화"]),
+        ("'설화' 제거", ["설화"]),  # 대상을 안 밝히면 이름에도 적용
+    ],
+)
+def test_removal_terms_scoped_to_name(reason, name_terms):
+    assert removal_terms(reason, name_only=True) == name_terms
+
+
+async def test_description_only_removal_keeps_name():
+    rec = defaultdict(list)
+    graph = build_content_graph(rejection_fns(rec, ["매운갈비찜"], desc="양념한 갈비를 쪄 낸 요리."))
+    state = await graph.ainvoke({"food_name": "매운갈비찜", "rejection_reason": "설명에서 '매운' 삭제, 음식명은 유지"})
+    assert rec["clean"][0][0] == "매운갈비찜" and state["cleaned_name"] == "매운갈비찜"
+    assert state["verdict"].passed is True
+
+
 def rejection_fns(rec, cleaned_seq, desc="소갈비를 양념에 재워 구운 요리."):
     """정제 결과를 시퀀스로 돌려주는 fns — 입력·피드백은 rec 에 남는다."""
     fns = build_fns(rec, name_review_seq=(True,) * 3, description_seq=(3, 3))

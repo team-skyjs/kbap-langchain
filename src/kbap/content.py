@@ -142,7 +142,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 이름 검수의 과교정 판정이 운영자가 지우라고 한 상호를 되살리지 않게.
     async def clean_name(state: ContentState):
         reason = state.get("rejection_reason", "")
-        source = strip_terms(state["food_name"], removal_terms(reason)) or state["food_name"]
+        source = strip_terms(state["food_name"], removal_terms(reason, name_only=True)) or state["food_name"]
         fix = await fns.clean_name(source, with_rejection(reason, state.get("name_feedback", ""), name_stage=True))
         return {
             "source_name": source,
@@ -156,7 +156,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     async def review_name(state: ContentState):
         r = await fns.review_name(state.get("source_name", state["food_name"]), state["cleaned_name"])
         update = {"name_review": r, "name_feedback": r.reason, "rejection_unmet": []}
-        unmet = unmet_terms(removal_terms(state.get("rejection_reason", "")), state["cleaned_name"])
+        unmet = unmet_terms(removal_terms(state.get("rejection_reason", ""), name_only=True), state["cleaned_name"])
         if unmet:
             update["rejection_unmet"] = unmet
             update["rejection_retries"] = state.get("rejection_retries", 0) + 1
@@ -256,7 +256,11 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         if desc.score < DESC_PASS_SCORE:
             rejected.append("description")
             reasons.append(f"설명 {desc.score}/{DESC_PASS_SCORE}점: {desc.reason}")
-        unmet = unmet_terms(removal_terms(state.get("rejection_reason", "")), state["cleaned_name"], state["description"])
+        reason = state.get("rejection_reason", "")
+        unmet = list(dict.fromkeys(
+            unmet_terms(removal_terms(reason, name_only=True), state["cleaned_name"])
+            + unmet_terms(removal_terms(reason), state["description"])
+        ))
         if unmet:
             rejected.append("rejection")
             reasons.append(_unmet_text(unmet, "이름·설명"))
@@ -449,8 +453,19 @@ _REMOVAL = re.compile(
 )
 
 
-def removal_terms(reason: str) -> list[str]:
-    return list(dict.fromkeys(t.strip() for t in _REMOVAL.findall(reason or "") if t.strip()))
+_NAME_WORDS = ("이름", "음식명", "메뉴명", "식당명", "상호", "브랜드")
+
+
+def removal_terms(reason: str, name_only: bool = False) -> list[str]:
+    """name_only 면 이름에 적용할 지목어만 — 같은 구절(앞 쉼표·마침표 이후)이 '설명'만 가리키면 설명 전용이다.
+    대상 필드를 안 밝힌 지시("'설화' 제거")는 이름·설명 둘 다에 적용한다."""
+    out = []
+    for m in _REMOVAL.finditer(reason or ""):
+        clause = re.split(r"[,.\n]", reason[: m.start()])[-1]
+        if name_only and "설명" in clause and not any(w in clause for w in _NAME_WORDS):
+            continue
+        out.append(m.group(1).strip())
+    return list(dict.fromkeys(t for t in out if t))
 
 
 def strip_terms(name: str, terms: list[str]) -> str:
