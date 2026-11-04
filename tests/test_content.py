@@ -20,6 +20,7 @@ from kbap.content import (
     build_content_graph,
     build_ingest_payload,
     fix_ramyeon,
+    removal_terms,
     process_event,
     valid_substances,
 )
@@ -408,12 +409,14 @@ def test_valid_substances_drops_zero_percent():
 class FakeGraph:
     def __init__(self, fail_names=(), verdict=None):
         self.calls = []
+        self.inputs = []
         self.fail_names = set(fail_names)
         self.verdict = verdict or JudgeVerdict(reason="ok", passed=True)
 
     async def ainvoke(self, state, config=None):
         name = state["food_name"]
         self.calls.append(name)
+        self.inputs.append(state)
         if name in self.fail_names:
             raise RuntimeError("LLM down")
         # 실제 그래프처럼 완결된 최종 상태를 돌려준다 — 페이로드 조립이 이 키들을 쓴다.
@@ -588,3 +591,100 @@ async def test_graph_normalizes_ramen_in_name_translations():
     graph = build_content_graph(fns._replace(clean_name=clean_name, generate_name_translations=generate_name_translations))
     state = await graph.ainvoke({"food_name": "김치라면"})
     assert state["name_translations"] == {"en": "Kimchi Ramyeon"}
+
+
+# ===== 운영자 반려 사유 (KB-996) =====
+
+SEOLHWA = "식당명 '설화' 제거"
+
+
+@pytest.mark.parametrize(
+    "reason, terms",
+    [
+        (SEOLHWA, ["설화"]),
+        ("“본가”를 빼 주세요", ["본가"]),
+        ("이름을 '소갈비 세트'로 바꾸고 '설화'는 지워", ["설화"]),  # 바꿀 이름은 제거 대상이 아니다
+        ("'설화' 반드시 삭제, '세트'도 떼기", ["설화", "세트"]),
+        ("설명이 너무 길다", []),  # 따옴표 지목이 없으면 규칙 확인 없이 LLM 반영만
+    ],
+)
+def test_removal_terms_only_quoted_with_removal_verb(reason, terms):
+    assert removal_terms(reason) == terms
+
+
+def rejection_fns(rec, cleaned_seq, desc="소갈비를 양념에 재워 구운 요리."):
+    """정제 결과를 시퀀스로 돌려주는 fns — 입력·피드백은 rec 에 남는다."""
+    fns = build_fns(rec, name_review_seq=(True,) * 3, description_seq=(3, 3))
+    cleaned = list(cleaned_seq)
+
+    async def clean_name(name, feedback):
+        rec["clean"].append((name, feedback))
+        return {"name": cleaned.pop(0), "reason": "정제"}
+
+    async def generate_description(name, feedback):
+        rec["generate_description"].append((name, feedback))
+        return desc
+
+    return fns._replace(clean_name=clean_name, generate_description=generate_description)
+
+
+async def test_rejection_reason_goes_to_name_description_and_ingredient_prompts():
+    rec = defaultdict(list)
+    graph = build_content_graph(rejection_fns(rec, ["소갈비 세트"]))
+    state = await graph.ainvoke({"food_name": "설화 소갈비 세트", "rejection_reason": SEOLHWA})
+
+    # 지목어는 LLM 전에 원본에서 빠지고, 사유 문장은 세 생성 단계 피드백에 모두 들어간다.
+    (source, name_fb), = rec["clean"]
+    assert source == "소갈비 세트" and SEOLHWA in name_fb and "다른 정제 규칙보다 우선" in name_fb
+    assert SEOLHWA in rec["generate_description"][0][1] and SEOLHWA in rec["generate_ingredients"][0][1]
+    assert rec["review_name"] == [("소갈비 세트", "소갈비 세트")]  # 검수도 뺀 원본과 비교 — 상호 제거를 과교정으로 보지 않게
+    assert state["verdict"].passed is True and state["cleaned_name"] == "소갈비 세트"
+
+
+async def test_without_rejection_reason_feedback_is_unchanged():
+    rec = defaultdict(list)
+    await build_content_graph(build_fns(rec)).ainvoke({"food_name": "김치찌게 8,000원"})
+    assert rec["clean"] == [("김치찌게 8,000원", "")]
+    assert rec["generate_description"] == [("김치찌개", "")] and rec["generate_ingredients"] == [("김치찌개", "")]
+
+
+async def test_unmet_rejection_retries_name_once_then_fails_without_generation():
+    rec = defaultdict(list)
+    graph = build_content_graph(rejection_fns(rec, ["설화 소갈비", "설화 소갈비"]))
+    state = await graph.ainvoke({"food_name": "설화 소갈비 세트", "rejection_reason": SEOLHWA})
+
+    assert len(rec["clean"]) == 2 and "반려 사유 미충족" in rec["clean"][1][1]
+    v = state["verdict"]
+    assert v.passed is False and v.failure_kind == "JUDGE_REJECTED" and v.reason.startswith("반려 사유 미충족")
+    assert not rec["generate_description"] and not rec["generate_ingredients"]  # 생성 콜 0
+
+
+async def test_unmet_rejection_fixed_on_retry_passes():
+    rec = defaultdict(list)
+    graph = build_content_graph(rejection_fns(rec, ["설화 소갈비 세트", "소갈비 세트"]))
+    state = await graph.ainvoke({"food_name": "설화 소갈비 세트", "rejection_reason": SEOLHWA})
+    assert len(rec["clean"]) == 2 and state["verdict"].passed is True
+
+
+async def test_term_left_in_description_regenerates_once_then_judge_rejects():
+    rec = defaultdict(list)
+    graph = build_content_graph(rejection_fns(rec, ["소갈비 세트"], desc="설화의 대표 메뉴인 소갈비."))
+    state = await graph.ainvoke({"food_name": "설화 소갈비 세트", "rejection_reason": SEOLHWA})
+
+    assert len(rec["generate_description"]) == 2 and "반려 사유 미충족" in rec["generate_description"][1][1]
+    v = state["verdict"]
+    assert v.passed is False and v.failure_kind == "JUDGE_REJECTED" and "rejection" in v.rejected_fields
+
+
+async def test_process_event_passes_rejection_reason_and_ignores_bad_type():
+    graph, kbap = FakeGraph(), FakeKbap()
+
+    def rec_with(mid, reason):
+        r = record(mid, 1, "설화 소갈비 세트")
+        r["body"] = json.dumps(json.loads(r["body"]) | {"rejectionReason": reason})
+        return r
+
+    event = {"Records": [rec_with("m1", f"  {SEOLHWA}  "), rec_with("m2", None), rec_with("m3", 123), record("m4", 2, "불고기")]}
+    assert await process_event(event, graph, kbap, concurrency=1) == []
+    reasons = [i.get("rejection_reason") for i in graph.inputs]
+    assert reasons == [SEOLHWA, None, None, None]  # 공백 정리, null·형식 오류·없음은 키 없음

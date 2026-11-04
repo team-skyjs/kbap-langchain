@@ -9,9 +9,11 @@ kbap(Spring) 콘텐츠 배치가 하던 생성·검수를 이 그래프가 전�
 생성 프롬프트는 kbap(Spring) infra/llm/food 운영 프롬프트를 옮긴 것이다.
 원본이 바뀌면 여기도 맞춘다. JSON 형식 지시는 structured output이 대신한다.
 
-SQS 메시지 계약: body = {"scannedName": <str>, "foodId": <int>, "outboxId": <int>}
+SQS 메시지 계약: body = {"scannedName": <str>, "foodId": <int>, "outboxId": <int>, "rejectionReason": <str|null>}
 foodId·outboxId 는 필수 — 적재 API 본문에 그대로 왕복시킨다(foodId 로 대상 특정,
 outboxId 로 조건부 UPDATE 게이트). 없으면 계약 위반으로 DLQ 행이다.
+rejectionReason 은 선택 — 운영자가 반려하며 쓴 사유(재수집 요청, KB-996). 있으면 정제·설명·기피성분
+생성에 반영하고, 따옴표로 지목한 제거 지시는 규칙으로 확인한다.
 처리 결과는 kbap 적재 API로 POST 한다 — 계약은 agenthub wiki/langchain-food-ingest-contract.md.
 부분 실패 보고(ReportBatchItemFailures)가 활성화되어 있어야 한다."""
 
@@ -117,6 +119,10 @@ class ContentState(TypedDict, total=False):
     ingredient_attempts: int
     ingredient_feedback: str
     long_description: str  # 벡터 검색 메타데이터 (화면 미노출)
+    rejection_reason: str  # 운영자 반려 사유(KB-996) — 없으면 키 없음
+    source_name: str  # 정제 입력 — 스캔 원본에서 반려 사유가 지목한 말을 뺀 것
+    rejection_unmet: list[str]  # 정제된 이름에 남은 지목어
+    rejection_retries: int
     verdict: JudgeVerdict
     review_traces: Annotated[list[dict], operator.add]  # 검수 엔진 판정 근거 — 평가·관측용, payload 미포함
 
@@ -132,19 +138,30 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     name_max_attempts 는 이름 정제의 총 실행 횟수 상한(초회 포함)이다."""
 
     # ① 이름 정제 — 스캔 원본에서 노이즈·오타를 제거한 이름을 모든 후속 노드에 전달한다.
+    # 반려 사유가 따옴표로 지목한 말은 LLM 전에 원본에서 뺀다 — 정제의 원본 유사도 가드(_plausible)와
+    # 이름 검수의 과교정 판정이 운영자가 지우라고 한 상호를 되살리지 않게.
     async def clean_name(state: ContentState):
-        fix = await fns.clean_name(state["food_name"], state.get("name_feedback", ""))
+        reason = state.get("rejection_reason", "")
+        source = strip_terms(state["food_name"], removal_terms(reason)) or state["food_name"]
+        fix = await fns.clean_name(source, with_rejection(reason, state.get("name_feedback", ""), name_stage=True))
         return {
+            "source_name": source,
             "cleaned_name": fix["name"],
             "clean_reason": fix.get("reason", ""),
             "name_attempts": state.get("name_attempts", 0) + 1,
         }
 
     # ①' 이름 검수 — 단일 음식 메뉴명인지(is_food)·그대로 써도 되는지(passed) 판정한다.
-    # 여기를 통과해야만 생성 분기가 시작된다.
+    # 여기를 통과해야만 생성 분기가 시작된다. 반려 사유의 지목어가 이름에 남았는지는 규칙으로 본다.
     async def review_name(state: ContentState):
-        r = await fns.review_name(state["food_name"], state["cleaned_name"])
-        return _traced(r, {"name_review": r, "name_feedback": r.reason})
+        r = await fns.review_name(state.get("source_name", state["food_name"]), state["cleaned_name"])
+        update = {"name_review": r, "name_feedback": r.reason, "rejection_unmet": []}
+        unmet = unmet_terms(removal_terms(state.get("rejection_reason", "")), state["cleaned_name"])
+        if unmet:
+            update["rejection_unmet"] = unmet
+            update["rejection_retries"] = state.get("rejection_retries", 0) + 1
+            update["name_feedback"] = " / ".join(x for x in (_unmet_text(unmet, "이름"), "" if r.passed else r.reason) if x)
+        return _traced(r, update)
 
     # 비음식·재정제 소진 — NOT_FOOD verdict 를 만들고 그래프를 끝내 생성·검수 콜을 아낀다.
     async def reject_name(state: ContentState):
@@ -155,11 +172,25 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
             )
         }
 
+    # 반려 사유 미충족이 재정제 1회 뒤에도 남으면 — 운영자 지시를 못 지킨 결과를 적재하지 않는다.
+    # failureKind 는 적재 계약의 기존 값(JUDGE_REJECTED)을 쓰고 사유 문구로 구분한다.
+    async def reject_unmet(state: ContentState):
+        return {
+            "verdict": JudgeVerdict(
+                passed=False,
+                reason=_unmet_text(state["rejection_unmet"], "이름"),
+                rejected_fields=["rejection"],
+                failure_kind="JUDGE_REJECTED",
+            )
+        }
+
     # 비음식은 재정제해도 음식이 안 되므로 즉시 거절, 불통과만 재정제 루프를 탄다.
     def route_after_review_name(state: ContentState):
         r = state["name_review"]
         if not r.is_food:
             return "reject_name"
+        if state.get("rejection_unmet"):
+            return "clean_name" if state["rejection_retries"] <= REJECTION_RETRIES else "reject_unmet"
         if not r.passed:
             if state["name_attempts"] < name_max_attempts:
                 return "clean_name"
@@ -178,13 +209,17 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
 
     # ③ 한국어 설명 생성(분기 2 시작) — 한 문장, 255자 이하
     async def generate_description(state: ContentState):
-        desc = await fns.generate_description(state["cleaned_name"], state.get("description_feedback", ""))
+        feedback = with_rejection(state.get("rejection_reason", ""), state.get("description_feedback", ""))
+        desc = await fns.generate_description(state["cleaned_name"], feedback)
         return {"description": desc, "description_attempts": state.get("description_attempts", 0) + 1}
 
     # 설명 검수 — 한국어 설명만 본다. 번역보다 먼저 실행해 탈락한 설명의 번역을 만들지 않는다.
+    # 반려 사유의 지목어가 설명에 남았으면 점수와 별개로 재생성 사유에 더한다(재생성은 기존 1회 한도).
     async def review_description(state: ContentState):
         score = await fns.review_description(state["cleaned_name"], state["description"])
-        return _traced(score, {"description_score": score, "description_feedback": score.reason})
+        unmet = unmet_terms(removal_terms(state.get("rejection_reason", "")), state["description"])
+        feedback = " / ".join(x for x in (unmet and _unmet_text(unmet, "설명"), score.reason) if x)
+        return _traced(score, {"description_score": score, "description_feedback": feedback})
 
     # 설명 번역 생성(분기 2 후속) — 확정된 설명으로 1회만
     async def generate_description_translations(state: ContentState):
@@ -193,7 +228,8 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
 
     # ④ 기피성분·매운맛 생성(분기 3) — 81종 후보에서 선택하고 후보 밖 코드는 저장 전에 거른다
     async def generate_ingredients(state: ContentState):
-        ing = await fns.generate_ingredients(state["cleaned_name"], state.get("ingredient_feedback", ""))
+        feedback = with_rejection(state.get("rejection_reason", ""), state.get("ingredient_feedback", ""))
+        ing = await fns.generate_ingredients(state["cleaned_name"], feedback)
         return {"ingredients": ing, "ingredient_attempts": state.get("ingredient_attempts", 0) + 1}
 
     # 기피성분·매운맛 검수(분기 3 후속) — 불통과면 재생성
@@ -210,6 +246,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # ⑤ 종합 판정 — 분기가 모두 끝난 뒤(defer) 규칙으로 PASS/FAIL을 정한다(LLM 없음, KB-897).
     # 입력이 설명 점수·기피성분 통과 여부 둘뿐이라 LLM 판정은 규칙을 흔들 뿐이었다(2점도 통과 가능).
     # 둘 다 미달이면 INGREDIENT_GUARD 가 이긴다 — 알레르기 데이터는 오통과가 누락보다 위험하다.
+    # 반려 사유의 지목어가 이름·설명에 남아 있으면 JUDGE_REJECTED("반려 사유 미충족") — 기피성분 불통과가 있으면 그쪽이 이긴다.
     def judge(state: ContentState):
         desc, ingredient = state["description_score"], state["ingredient_review"]
         rejected, reasons = [], []
@@ -219,6 +256,10 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         if desc.score < DESC_PASS_SCORE:
             rejected.append("description")
             reasons.append(f"설명 {desc.score}/{DESC_PASS_SCORE}점: {desc.reason}")
+        unmet = unmet_terms(removal_terms(state.get("rejection_reason", "")), state["cleaned_name"], state["description"])
+        if unmet:
+            rejected.append("rejection")
+            reasons.append(_unmet_text(unmet, "이름·설명"))
         if not rejected:
             return {"verdict": JudgeVerdict(reason="설명 3점·기피성분 검수 통과", passed=True)}
         kind = "INGREDIENT_GUARD" if "avoidance" in rejected else "JUDGE_REJECTED"
@@ -230,7 +271,8 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 설명은 3점 만점(DESC_PASS_SCORE)만 통과, 기피성분은 통과/불통과 — 미달이면 1회 재생성.
     # 재시도 소진 시에도 번역은 만들어 judge 로 보낸다 — judge 가 통과시키면 payload 에 필요하다.
     def route_after_review_description(state: ContentState) -> str:
-        failed = state["description_score"].score < DESC_PASS_SCORE
+        unmet = unmet_terms(removal_terms(state.get("rejection_reason", "")), state["description"])
+        failed = state["description_score"].score < DESC_PASS_SCORE or bool(unmet)
         if failed and state["description_attempts"] < max_attempts:
             return "generate_description"
         return "generate_description_translations"
@@ -246,6 +288,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     g.add_node("clean_name", clean_name, retry_policy=retry)
     g.add_node("review_name", review_name, retry_policy=retry)
     g.add_node("reject_name", reject_name)  # LLM 없음 — 재시도 불필요
+    g.add_node("reject_unmet", reject_unmet)
     g.add_node("generate_name_translations", generate_name_translations, retry_policy=retry)
     g.add_node("generate_description", generate_description, retry_policy=retry)
     g.add_node("generate_description_translations", generate_description_translations, retry_policy=retry)
@@ -264,6 +307,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         [
             "clean_name",
             "reject_name",
+            "reject_unmet",
             "generate_name_translations",
             "generate_description",
             "generate_ingredients",
@@ -271,6 +315,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
         ],
     )
     g.add_edge("reject_name", END)
+    g.add_edge("reject_unmet", END)
     g.add_edge("generate_name_translations", "judge")  # 검수 없이 join만
     g.add_edge("generate_description", "review_description")  # 검수 먼저 — 탈락한 설명의 번역을 만들지 않는다
     g.add_edge("generate_description_translations", "judge")
@@ -387,6 +432,45 @@ def valid_substances(items: list[dict]) -> list[dict]:
         seen.add(code)
         out.append(item)
     return out
+
+
+# ===== 운영자 반려 사유 (KB-996) =====
+# 서버가 재수집 요청에 rejectionReason(최대 1000자, 운영자가 쓴 한국어 문장)을 싣는다.
+# 문장 전체는 정제·설명·기피성분 프롬프트의 피드백 자리에 들어간다 — Langfuse 템플릿의 {{feedback_block}}
+# 변수를 그대로 쓰므로 운영 프롬프트를 고치지 않아도 반영된다. 규칙으로 확인하는 것은 따옴표로 지목한
+# 제거 지시뿐이다("식당명 '설화' 제거"). 따옴표 없는 지시는 LLM 반영만 한다.
+MAX_REJECTION_REASON = 1000
+REJECTION_RETRIES = 1  # 지목어가 남았을 때 재정제 횟수
+_QUOTE = "'\"‘’“”"
+_REMOVAL = re.compile(
+    rf"[{_QUOTE}]([^{_QUOTE}]{{1,30}})[{_QUOTE}]\s*(?:을|를|은|는|도)?\s*(?:꼭|반드시)?\s*(?:제거|삭제|빼|떼|없애|지우|지워)"
+)
+
+
+def removal_terms(reason: str) -> list[str]:
+    return list(dict.fromkeys(t.strip() for t in _REMOVAL.findall(reason or "") if t.strip()))
+
+
+def strip_terms(name: str, terms: list[str]) -> str:
+    for t in terms:
+        name = name.replace(t, " ")
+    return " ".join(name.split())
+
+
+def unmet_terms(terms: list[str], *texts: str) -> list[str]:
+    return [t for t in terms if any(t in x for x in texts if x)]
+
+
+def _unmet_text(terms: list[str], where: str) -> str:
+    return f"반려 사유 미충족: {', '.join(repr(t) for t in terms)} 이(가) {where}에 남아 있음 — 지울 것"
+
+
+def with_rejection(reason: str, feedback: str, name_stage: bool = False) -> str:
+    """운영자 반려 사유를 검수 탈락 피드백 앞에 붙인다. 사유가 없으면 피드백 그대로 — 기존 동작과 같다."""
+    if not reason:
+        return feedback
+    rule = " — 식당명·브랜드를 지우라는 지시는 다른 정제 규칙보다 우선" if name_stage else ""
+    return "\n".join(x for x in (f"운영자 반려 사유(반드시 반영{rule}): {reason}", feedback) if x)
 
 
 def _feedback_block(feedback: str) -> str:
@@ -694,11 +778,16 @@ async def process_event(
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             log.warning("계약 위반 메시지 %s: %s", message_id, e)
             return message_id
+        # 반려 사유는 선택 — 형식이 틀리면 버리고 재생성은 한다(사유 때문에 재수집 자체를 잃지 않게).
+        reason = body.get("rejectionReason")
+        if reason is not None and not isinstance(reason, str):
+            log.warning("rejectionReason 형식 오류(무시) %s: %r", message_id, type(reason).__name__)
+            reason = None
+        reason = (reason or "").strip()[:MAX_REJECTION_REASON]
+        graph_input = {"food_name": name} | ({"rejection_reason": reason} if reason else {})
         async with sem:
             try:
-                result = await graph.ainvoke(
-                    {"food_name": name}, config={"callbacks": callbacks}
-                )
+                result = await graph.ainvoke(graph_input, config={"callbacks": callbacks})
             except Exception:
                 # 런타임 에러는 POST 없이 재시도로 — FAILED에 인프라 장애를 섞지 않는다(계약 전제).
                 log.exception("그래프 실패 foodId=%s (%s)", food_id, name)

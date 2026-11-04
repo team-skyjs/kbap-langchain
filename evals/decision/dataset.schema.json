@@ -83,6 +83,18 @@
           "default": null,
           "title": "Scanned Name"
         },
+        "rejection_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rejection Reason"
+        },
         "name_review": {
           "anyOf": [
             {

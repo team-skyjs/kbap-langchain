@@ -225,3 +225,12 @@ async def test_fixed_rows_record_llm_tokens_and_cost(ev):
 
     assert [r["llm_usage"] for r in rows] == [{"input_tokens": 1000, "output_tokens": 100}] * 3
     assert ev.cost(rows)["usd"] == pytest.approx(3 * (1000 * 0.10 + 100 * 0.50) / 1e6)
+
+
+async def test_pipeline_passes_rejection_reason_to_graph(ev):
+    # KB-996 — 반려 사유가 있는 항목은 사유와 함께 그래프에 들어가 지목어가 빠진 이름으로 정제된다.
+    ds = ev.load_dataset(str(SAMPLE), None)
+    a = ev.mock_llm_fns()
+    rows = await ev.run_pipeline(ds, {"A": lambda: (a, None)}, concurrency=2)
+    row = next(r for r in rows if r["rejection_reason"])
+    assert row["scanned_name"] == "설화 소갈비 세트" and "설화" not in row["cleaned_name"]
