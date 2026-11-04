@@ -618,16 +618,26 @@ def test_removal_terms_only_quoted_with_removal_verb(reason, terms):
 
 
 @pytest.mark.parametrize(
-    "reason, name_terms",
+    "reason, name_terms, desc_terms",
     [
-        ("설명에서 '매운' 삭제, 음식명은 유지", []),  # 설명 전용 — 이름(매운갈비찜)은 건드리지 않는다(Codex #21)
-        ("이름에서 '설화' 제거, 설명에서 '매운' 삭제", ["설화"]),
-        (SEOLHWA, ["설화"]),
-        ("'설화' 제거", ["설화"]),  # 대상을 안 밝히면 이름에도 적용
+        ("설명에서 '매운' 삭제, 음식명은 유지", [], ["매운"]),  # 설명 전용 — 이름(매운갈비찜)은 건드리지 않는다(Codex #21)
+        ("음식명에서 '매운' 삭제, 설명은 유지", ["매운"], []),  # 이름 전용 — 설명은 그대로 둔다(Codex #21)
+        ("이름에서 '설화' 제거, 설명에서 '매운' 삭제", ["설화"], ["매운"]),
+        (SEOLHWA, ["설화"], ["설화"]),  # 식당명은 필드가 아니다 — 이름·설명 둘 다
+        ("'설화' 제거", ["설화"], ["설화"]),
     ],
 )
-def test_removal_terms_scoped_to_name(reason, name_terms):
-    assert removal_terms(reason, name_only=True) == name_terms
+def test_removal_terms_scoped_to_field(reason, name_terms, desc_terms):
+    assert removal_terms(reason, "name") == name_terms
+    assert removal_terms(reason, "description") == desc_terms
+
+
+async def test_name_only_removal_keeps_description():
+    rec = defaultdict(list)
+    graph = build_content_graph(rejection_fns(rec, ["갈비찜"], desc="매운 양념으로 조리한 갈비 요리."))
+    state = await graph.ainvoke({"food_name": "매운갈비찜", "rejection_reason": "음식명에서 '매운' 삭제, 설명은 유지"})
+    assert state["cleaned_name"] == "갈비찜" and len(rec["generate_description"]) == 1
+    assert state["verdict"].passed is True
 
 
 async def test_description_only_removal_keeps_name():
