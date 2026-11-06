@@ -776,3 +776,20 @@ async def test_drink_section_header_and_shop_name_stay_not_food(name):
 
     assert state["verdict"].failure_kind == "NOT_FOOD"
     assert rec["generate_ingredients"] == []
+
+
+async def test_drink_quality_rejection_still_recleans():
+    # Codex P2 — 음료로 인정(is_food=true)했지만 판매 문구·과교정으로 불통과면 규칙이 덮지 않고 재정제한다.
+    review = NameReview(reason="'오늘만' 판매 문구를 지울 것", is_food=True, passed=False)
+    state, rec = await drink_graph("오늘만 소주", review)
+
+    assert len(rec["clean"]) == 3 and state["verdict"].failure_kind == "NOT_FOOD"
+    assert rec["generate_ingredients"] == []
+
+
+def test_alcohol_not_forced_when_source_was_non_alcoholic():
+    from kbap.content import with_alcohol
+
+    ing = {"substances": [{"code": "BARLEY", "inclusionPercent": 90}], "spiciness": 0}
+    assert with_alcohol("맥주", ing, "무알콜 맥주") == ing
+    assert with_alcohol("맥주", ing, "맥주")["substances"][0] == {"code": "ALCOHOL", "inclusionPercent": 100}

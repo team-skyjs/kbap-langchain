@@ -155,8 +155,9 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 여기를 통과해야만 생성 분기가 시작된다. 반려 사유의 지목어가 이름에 남았는지는 규칙으로 본다.
     async def review_name(state: ContentState):
         r = await fns.review_name(state.get("source_name", state["food_name"]), state["cleaned_name"])
-        if not (r.is_food and r.passed) and drink_kind(state["cleaned_name"]):
-            # 음료·술 메뉴명 — 글자 규칙이 노이즈·숫자가 없음을 이미 확인했다(L-973).
+        if not r.is_food and drink_kind(state["cleaned_name"]):
+            # 음료·술 메뉴명 — 글자 규칙이 노이즈·숫자가 없음을 이미 확인했다(L-973). 분류만 덮는다:
+            # is_food=true 인 불통과(판매 문구·과교정 '무알콜 맥주'→'맥주')는 기존 재정제 루프를 그대로 탄다.
             log.info("음료·주류 메뉴명으로 통과 (%s): 검수 사유 무시 — %s", state["cleaned_name"], r.reason)
             trace = r._trace
             r = NameReview(reason="음료·주류 메뉴명", is_food=True, passed=True)
@@ -235,7 +236,8 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # ④ 기피성분·매운맛 생성(분기 3) — 81종 후보에서 선택하고 후보 밖 코드는 저장 전에 거른다
     async def generate_ingredients(state: ContentState):
         feedback = with_rejection(state.get("rejection_reason", ""), state.get("ingredient_feedback", ""))
-        ing = with_alcohol(state["cleaned_name"], await fns.generate_ingredients(state["cleaned_name"], feedback))
+        ing = await fns.generate_ingredients(state["cleaned_name"], feedback)
+        ing = with_alcohol(state["cleaned_name"], ing, state.get("source_name", state["food_name"]))
         return {"ingredients": ing, "ingredient_attempts": state.get("ingredient_attempts", 0) + 1}
 
     # 기피성분·매운맛 검수(분기 3 후속) — 불통과면 재생성
@@ -753,9 +755,10 @@ def drink_kind(name: str) -> str | None:
     return "alcohol" if m.group(1) and not _NON_ALCOHOLIC.search(name) else "soft"
 
 
-def with_alcohol(name: str, ingredients: dict) -> dict:
-    """술 메뉴면 ALCOHOL 을 100% 로 넣는다 — 생성 모델이 빠뜨려도 서버의 술 판정이 어긋나지 않게."""
-    if drink_kind(name) != "alcohol":
+def with_alcohol(name: str, ingredients: dict, source: str = "") -> dict:
+    """술 메뉴면 ALCOHOL 을 100% 로 넣는다 — 생성 모델이 빠뜨려도 서버의 술 판정이 어긋나지 않게.
+    원본에 무알콜 표시가 있으면 정제가 그걸 지웠어도 넣지 않는다."""
+    if drink_kind(name) != "alcohol" or _NON_ALCOHOLIC.search(source):
         return ingredients
     subs = [s for s in ingredients["substances"] if s["code"] != "ALCOHOL"]
     return ingredients | {"substances": [{"code": "ALCOHOL", "inclusionPercent": ALCOHOL_MIN_PERCENT}, *subs]}
