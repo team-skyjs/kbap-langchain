@@ -212,7 +212,8 @@ present(들어갈 가능성 있는)만 나열한다. 사실상 0%인 성분은 �
 - 카라멜소스·연유: MILK/DAIRY
 - 떡볶이·라볶이의 떡: 밀떡 흔함 → WHEAT 40~70
 - 소시지·햄·베이컨·스팸: PORK 90+
-- 술(소주·맥주·생맥주·막걸리·와인·하이볼·칵테일·매실주·청주): ALCOHOL 100 필수 (맥주엔 BARLEY·WHEAT, 막걸리엔 WHEAT 흔함)
+- 술(소주·맥주·생맥주·막걸리·와인·하이볼·칵테일·매실주·청주): ALCOHOL 100 필수 (맥주엔 BARLEY·WHEAT, 막걸리엔 WHEAT 흔함).
+  제로슈거·제로칼로리 술도 술이다 — 무알콜·논알콜·카스제로처럼 알코올이 없을 때만 ALCOHOL 을 뺀다
 - 미림·맛술: MIRIN, ALCOHOL, COOKING_WINE
 - 김치(반찬·찌개·볶음밥): FISH_SAUCE 70+, SALTED_SHRIMP 50+, GARLIC, SCALLION
 - 파·대파·쪽파·마늘·양파: SCALLION/GARLIC/ONION, 한식 양념 베이스 대개 60~90

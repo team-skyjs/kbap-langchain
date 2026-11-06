@@ -793,3 +793,16 @@ def test_alcohol_not_forced_when_source_was_non_alcoholic():
     ing = {"substances": [{"code": "BARLEY", "inclusionPercent": 90}], "spiciness": 0}
     assert with_alcohol("맥주", ing, "무알콜 맥주") == ing
     assert with_alcohol("맥주", ing, "맥주")["substances"][0] == {"code": "ALCOHOL", "inclusionPercent": 100}
+
+
+@pytest.mark.parametrize("source, alcohol", [
+    # L-973b — 제로슈거·제로칼로리는 술의 수식어다(서버 #601 과 같은 규칙). 단독 '제로'(카스제로)와 무알콜류만 무알코올.
+    ("제로슈거소주", True), ("제로슈거 소주", True), ("제로칼로리 하이볼", True), ("제로 슈가 소주", True), ("제로당 막걸리", True),
+    ("카스제로", False), ("카스제로 맥주", False), ("무알코올맥주", False), ("무알콜 맥주", False), ("논알코올 맥주", False), ("비알콜 맥주", False),
+])
+def test_zero_sugar_drinks_keep_alcohol(source, alcohol):
+    from kbap.content import with_alcohol
+
+    ing = {"substances": [], "spiciness": 0}
+    got = with_alcohol(source, ing, source)["substances"]
+    assert got == ([{"code": "ALCOHOL", "inclusionPercent": 100}] if alcohol else [])
