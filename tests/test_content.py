@@ -724,3 +724,72 @@ async def test_process_event_passes_rejection_reason_and_ignores_bad_type():
     assert await process_event(event, graph, kbap, concurrency=1) == []
     reasons = [i.get("rejection_reason") for i in graph.inputs]
     assert reasons == [SEOLHWA, None, None, None]  # 공백 정리, null·형식 오류·없음은 키 없음
+
+
+# ===== L-973 음료·술 메뉴 =====
+
+
+@pytest.mark.parametrize("name, kind", [
+    ("소주", "alcohol"), ("맥주", "alcohol"), ("생맥주", "alcohol"), ("하이볼", "alcohol"), ("레몬 하이볼", "alcohol"),
+    ("막걸리", "alcohol"), ("카스 맥주", "alcohol"), ("무알콜 맥주", "soft"), ("콜라", "soft"), ("사이다", "soft"),
+    ("음료수", "soft"), ("오렌지주스", "soft"), ("아이스 아메리카노", "soft"),
+    # 섹션 제목·가게명·음식·노이즈는 규칙 밖 — LLM 판단 그대로
+    ("음료/주류", None), ("주류", None), ("음료", None), ("역전할머니맥주", None), ("김밥천국", None),
+    ("소주 5,000원", None), ("맥주안주", None), ("김치찌개", None),
+])
+def test_drink_kind(name, kind):
+    from kbap.content import drink_kind
+
+    assert drink_kind(name) == kind
+
+
+async def drink_graph(name, review):
+    rec = defaultdict(list)
+
+    async def clean_name(n, feedback):
+        rec["clean"].append(n)
+        return {"name": n, "reason": "그대로"}
+
+    async def review_name(original, cleaned):
+        return review
+
+    fns = build_fns(rec)._replace(clean_name=clean_name, review_name=review_name)
+    return await build_content_graph(fns).ainvoke({"food_name": name}), rec
+
+
+@pytest.mark.parametrize("name", ["소주", "맥주", "생맥주", "하이볼", "콜라", "사이다", "음료수"])
+async def test_drink_menu_is_not_dropped_as_not_food(name):
+    # 운영 #412·#258·#413 — 이름 검수가 "주류이므로 음식 메뉴명 아님"으로 떨어뜨려도 콘텐츠를 만든다.
+    review = NameReview(reason=f"{name}는 주류이므로 음식 메뉴명으로 분류하지 마세요", is_food=False, passed=False)
+    state, rec = await drink_graph(name, review)
+
+    assert state["verdict"].passed is True and state["verdict"].failure_kind is None
+    assert rec["generate_description"] and rec["generate_ingredients"]
+    alcohol = [s for s in state["ingredients"]["substances"] if s["code"] == "ALCOHOL"]
+    assert alcohol == ([{"code": "ALCOHOL", "inclusionPercent": 100}] if name not in ("콜라", "사이다", "음료수") else [])
+
+
+@pytest.mark.parametrize("name", ["음료/주류", "역전할머니맥주"])
+async def test_drink_section_header_and_shop_name_stay_not_food(name):
+    review = NameReview(reason="카테고리 제목·가게 이름", is_food=False, passed=False)
+    state, rec = await drink_graph(name, review)
+
+    assert state["verdict"].failure_kind == "NOT_FOOD"
+    assert rec["generate_ingredients"] == []
+
+
+async def test_drink_quality_rejection_still_recleans():
+    # Codex P2 — 음료로 인정(is_food=true)했지만 판매 문구·과교정으로 불통과면 규칙이 덮지 않고 재정제한다.
+    review = NameReview(reason="'오늘만' 판매 문구를 지울 것", is_food=True, passed=False)
+    state, rec = await drink_graph("오늘만 소주", review)
+
+    assert len(rec["clean"]) == 3 and state["verdict"].failure_kind == "NOT_FOOD"
+    assert rec["generate_ingredients"] == []
+
+
+def test_alcohol_not_forced_when_source_was_non_alcoholic():
+    from kbap.content import with_alcohol
+
+    ing = {"substances": [{"code": "BARLEY", "inclusionPercent": 90}], "spiciness": 0}
+    assert with_alcohol("맥주", ing, "무알콜 맥주") == ing
+    assert with_alcohol("맥주", ing, "맥주")["substances"][0] == {"code": "ALCOHOL", "inclusionPercent": 100}

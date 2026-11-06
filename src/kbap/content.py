@@ -155,6 +155,13 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     # 여기를 통과해야만 생성 분기가 시작된다. 반려 사유의 지목어가 이름에 남았는지는 규칙으로 본다.
     async def review_name(state: ContentState):
         r = await fns.review_name(state.get("source_name", state["food_name"]), state["cleaned_name"])
+        if not r.is_food and drink_kind(state["cleaned_name"]):
+            # 음료·술 메뉴명 — 글자 규칙이 노이즈·숫자가 없음을 이미 확인했다(L-973). 분류만 덮는다:
+            # is_food=true 인 불통과(판매 문구·과교정 '무알콜 맥주'→'맥주')는 기존 재정제 루프를 그대로 탄다.
+            log.info("음료·주류 메뉴명으로 통과 (%s): 검수 사유 무시 — %s", state["cleaned_name"], r.reason)
+            trace = r._trace
+            r = NameReview(reason="음료·주류 메뉴명", is_food=True, passed=True)
+            r._trace = trace
         update = {"name_review": r, "name_feedback": r.reason, "rejection_unmet": []}
         unmet = unmet_terms(removal_terms(state.get("rejection_reason", ""), "name"), state["cleaned_name"])
         if unmet:
@@ -230,6 +237,7 @@ def build_content_graph(fns: ContentFns, max_attempts: int = 2, name_max_attempt
     async def generate_ingredients(state: ContentState):
         feedback = with_rejection(state.get("rejection_reason", ""), state.get("ingredient_feedback", ""))
         ing = await fns.generate_ingredients(state["cleaned_name"], feedback)
+        ing = with_alcohol(state["cleaned_name"], ing, state.get("source_name", state["food_name"]))
         return {"ingredients": ing, "ingredient_attempts": state.get("ingredient_attempts", 0) + 1}
 
     # 기피성분·매운맛 검수(분기 3 후속) — 불통과면 재생성
@@ -726,6 +734,34 @@ def fix_ramyeon(name: str, translations: dict[str, str]) -> dict[str, str]:
     if fixed != translations:
         log.info("이름 번역 Ramen → Ramyeon 정규화 (%s)", name)
     return fixed
+
+
+# L-973 — 메뉴판의 음료·술은 메뉴다. 이름 검수 LLM 이 "주류라 음식 아님"으로 떨어뜨리면(운영 #412·#258·#413)
+# 규칙으로 되살린다. 수식어는 4자까지만(생·병·캔·수제·레몬) — 그보다 긴 "역전할머니맥주"류는 가게명일 수 있어 LLM 판단에 맡긴다.
+# "음료"·"주류" 같은 섹션 제목은 아래 단어로 끝나지 않아 걸리지 않는다. "음료수"는 메뉴판에 그대로 적히는 메뉴로 본다.
+# ponytail: 단어 목록, 브랜드명 단독(참이슬·카스)은 프롬프트에 맡긴다 — 실패가 다시 보이면 목록에 더한다.
+_ALCOHOL_DRINKS = "생맥주|맥주|소주|막걸리|동동주|와인|하이볼|칵테일|사케|청주|매실주|복분자주|고량주|위스키|소맥"
+_SOFT_DRINKS = "콜라|사이다|음료수|주스|쥬스|커피|아메리카노|라떼|에이드|탄산수|생수|식혜|수정과|아이스티|녹차|홍차|유자차"
+_DRINK = re.compile(rf"^(?:[가-힣A-Za-z]{{1,4}} ?)?(?:({_ALCOHOL_DRINKS})|{_SOFT_DRINKS})$")
+_NON_ALCOHOLIC = re.compile(r"무알[콜코]|논알[콜코]|제로")
+ALCOHOL_MIN_PERCENT = 100  # 서버 Food.isAlcoholicDrink 가 ALCOHOL 비율로 공용 술 이미지를 고른다
+
+
+def drink_kind(name: str) -> str | None:
+    """'alcohol' / 'soft' / None. 음료·술 메뉴명이 아니면 None."""
+    m = _DRINK.match(name.strip())
+    if not m:
+        return None
+    return "alcohol" if m.group(1) and not _NON_ALCOHOLIC.search(name) else "soft"
+
+
+def with_alcohol(name: str, ingredients: dict, source: str = "") -> dict:
+    """술 메뉴면 ALCOHOL 을 100% 로 넣는다 — 생성 모델이 빠뜨려도 서버의 술 판정이 어긋나지 않게.
+    원본에 무알콜 표시가 있으면 정제가 그걸 지웠어도 넣지 않는다."""
+    if drink_kind(name) != "alcohol" or _NON_ALCOHOLIC.search(source):
+        return ingredients
+    subs = [s for s in ingredients["substances"] if s["code"] != "ALCOHOL"]
+    return ingredients | {"substances": [{"code": "ALCOHOL", "inclusionPercent": ALCOHOL_MIN_PERCENT}, *subs]}
 
 
 _graph = None
