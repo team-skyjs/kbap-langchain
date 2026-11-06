@@ -3,7 +3,8 @@
 검수 A/B 평가에 쓸 음식 사례를 고르는 기준과 레코드 형식이다.
 사람 정답 라벨링은 커맨드 센터와 예진이 진행한다. 이 문서는 무엇을 뽑고 어떻게 적을지만 정한다.
 
-- **라벨 상태: draft v1, 확정 전.** 데이터는 `data/dataset-manifest.json`(331건, real 188·synthetic 143)이고 선정 기록은 `data/selection-notes.md`다. 사람 확인(`needs_human`) 124건이 끝나면 `label_status` 를 `confirmed` 로 바꾸고 `dataset_version` 을 올려 다시 커밋한다(받는 값: `draft|reviewed|confirmed`).
+- **라벨 상태: `dev-2026-11-06-confirmed-v1` — 326건 confirmed, 5건 reviewed(미결).** 데이터는 `data/dataset-manifest.json`(331건, real 188·synthetic 143)이고 선정 기록은 `data/selection-notes.md`다. 사람 확인(`needs_human`) 124건은 R-145 검토(2026-10-31)와 예진 승인 규칙(2026-11-06)으로 확정했다. 미결 5건(악어걸리·호불정식·팔룡·아재볶음·쌈밥)은 `needs_human: true`·`label_status: reviewed` 로 남기고 모르는 라벨은 null 이다 — 요약표에서 따로 집계된다(받는 값: `draft|reviewed|confirmed`).
+- 기피성분 누락 규칙(승인): 대표 레시피 포함 가능성 50% 이상이면 `critical_missing`. 30~49%는 알레르기 코드면 critical, 비알레르기 기피 코드면 `ingredients_ok=false` 만. 30% 미만은 누락 허용. 양조간장(볶음·조림·양념장)만 WHEAT 를 요구하고 국간장·된장의 SOY 는 WHEAT 불요. 곁들임 소스(국밥 새우젓, 겨자 등)는 음식에 포함한다. 종교·식이 직결 주재료(PORK·BEEF·LAMB) 누락도 critical 이다. 카탈로그에 없는 성분(말고기)의 누락은 감점하지 않는다.
 - 스키마의 기준은 `run.py` 의 `Dataset` 모델이다. 기계용 사본은 `dataset.schema.json` 이고 `run.py schema` 로 다시 만든다. 테스트가 둘이 같은지 확인한다.
 - 수량은 시작 제안이다. **음식 수와 레코드 수는 다르다.** 음식 하나에 정상 1건과 오류 변형 여러 건이 붙는다.
 
