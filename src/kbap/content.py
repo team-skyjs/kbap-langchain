@@ -743,22 +743,28 @@ def fix_ramyeon(name: str, translations: dict[str, str]) -> dict[str, str]:
 _ALCOHOL_DRINKS = "생맥주|맥주|소주|막걸리|동동주|와인|하이볼|칵테일|사케|청주|매실주|복분자주|고량주|위스키|소맥"
 _SOFT_DRINKS = "콜라|사이다|음료수|주스|쥬스|커피|아메리카노|라떼|에이드|탄산수|생수|식혜|수정과|아이스티|녹차|홍차|유자차"
 _DRINK = re.compile(rf"^(?:[가-힣A-Za-z]{{1,4}} ?)?(?:({_ALCOHOL_DRINKS})|{_SOFT_DRINKS})$")
-_NON_ALCOHOLIC = re.compile(r"무알[콜코]|논알[콜코]|제로")
+# 서버 #601 과 같은 규칙: "제로슈거·제로칼로리·제로당" 은 술의 수식어라 먼저 지운다. 남은 "제로"(카스제로 = 0.0)만 무알코올.
+_ZERO_SUGAR = re.compile(r"제로\s*(?:슈거|슈가|칼로리|당)")
+_NON_ALCOHOLIC = re.compile(r"[무논비]알[콜코]|제로")
 ALCOHOL_MIN_PERCENT = 100  # 서버 Food.isAlcoholicDrink 가 ALCOHOL 비율로 공용 술 이미지를 고른다
+
+
+def non_alcoholic(name: str) -> bool:
+    return bool(_NON_ALCOHOLIC.search(_ZERO_SUGAR.sub("", name)))
 
 
 def drink_kind(name: str) -> str | None:
     """'alcohol' / 'soft' / None. 음료·술 메뉴명이 아니면 None."""
-    m = _DRINK.match(name.strip())
+    m = _DRINK.match(_ZERO_SUGAR.sub("", name).strip())
     if not m:
         return None
-    return "alcohol" if m.group(1) and not _NON_ALCOHOLIC.search(name) else "soft"
+    return "alcohol" if m.group(1) and not non_alcoholic(name) else "soft"
 
 
 def with_alcohol(name: str, ingredients: dict, source: str = "") -> dict:
     """술 메뉴면 ALCOHOL 을 100% 로 넣는다 — 생성 모델이 빠뜨려도 서버의 술 판정이 어긋나지 않게.
     원본에 무알콜 표시가 있으면 정제가 그걸 지웠어도 넣지 않는다."""
-    if drink_kind(name) != "alcohol" or _NON_ALCOHOLIC.search(source):
+    if drink_kind(name) != "alcohol" or non_alcoholic(source):
         return ingredients
     subs = [s for s in ingredients["substances"] if s["code"] != "ALCOHOL"]
     return ingredients | {"substances": [{"code": "ALCOHOL", "inclusionPercent": ALCOHOL_MIN_PERCENT}, *subs]}
