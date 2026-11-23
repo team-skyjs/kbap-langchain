@@ -225,20 +225,20 @@ def init_model(name: str, timeout: int):
 
 
 def structured(llm, schema):
-    """with_structured_output 을 제공자 차이 없이 부른다.
+    """with_structured_output 을 제공자 차이 없이 부른다. Claude(anthropic)는 json_schema, 나머지는 기존 기본값.
 
-    Claude Sonnet 5.5 처럼 강제 tool_choice 를 거부하는 모델(langchain profile 의 tool_choice=False)은
-    기본 방식(function_calling)에서 강제가 빠져, 모델이 툴을 안 부르면 OutputParserException 이 난다.
-    그런 모델은 Claude 전용 structured output(json_schema)을 쓴다 — ge/le·min_length 같은 미지원 제약은
+    Claude 의 기본 방식(function_calling)은 두 모델 모두에서 문제였다:
+    - Sonnet 5.5 는 강제 tool_choice 를 거부해 강제가 빠지고, 툴을 안 부르면 OutputParserException 이 난다.
+    - Haiku 5.5 는 강제 툴 호출이면 thinking 을 건너뛴다 — 기피성분 검수가 추론 없이 답해 탈락이 쏟아졌다.
+    json_schema 는 Claude structured output 이다. ge/le·min_length 같은 미지원 제약은
     anthropic.transform_schema 가 설명으로 옮기고 pydantic 이 받은 뒤 검증한다.
-    나머지(openai·gemini·Haiku 5.5)는 기존 기본값 그대로다.
+    KBAP_STRUCTURED_METHOD(json_schema|function_calling)가 있으면 그 값이 이긴다(비교용).
     """
-    # KBAP_STRUCTURED_METHOD=json_schema 는 비교용 강제 — Haiku 5.5 는 강제 툴 호출이면 thinking 을 건너뛴다.
-    if os.environ.get("KBAP_STRUCTURED_METHOD") == "json_schema" or (
-        (getattr(llm, "profile", None) or {}).get("tool_choice") is False
-    ):
-        return llm.with_structured_output(schema, method="json_schema")
-    return llm.with_structured_output(schema)
+    # langchain profile 은 Haiku 5.5 를 structured_output=False 로 적지만 실제 API 는 받는다 — 2026-11-23 홈서버 표본 30건 실측(KB-1028: 통과 29·error 0, 강제 tool_choice 는 통과 4).
+    method = os.environ.get("KBAP_STRUCTURED_METHOD") or (
+        "json_schema" if getattr(llm, "_llm_type", "") == "anthropic-chat" else None
+    )
+    return llm.with_structured_output(schema, method=method) if method else llm.with_structured_output(schema)
 
 
 def make_scorers(config):
