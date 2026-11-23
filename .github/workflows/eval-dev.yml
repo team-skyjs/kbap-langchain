@@ -1,3 +1,4 @@
+# 2026-11-25 AWS 계정 파기(KB-1028)로 dev Lambda 가 없다 — 수동 실행 전용이며 지금은 실행해도 실패한다.
 # dev Lambda 에서 검수 엔진 A/B 평가를 돌린다(KB-913) — 로컬 키·로컬 유료 호출 없이 배포와 같은 시크릿으로.
 #   gh workflow run eval-dev.yml --ref <브랜치> -f mode=fixed -f engine=both -f split=tune -f live=false
 # 대상은 dev 함수(kbap-generate-content) 하나로 하드코딩한다. prod 함수는 이 워크플로에 등장하지 않는다.

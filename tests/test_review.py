@@ -601,3 +601,26 @@ async def test_run_batch_missing_food_id_is_held():
 
     assert counts == {"PASS": 0, "FAIL": 0, "HELD": 1}
     assert client.posts == []
+
+
+def test_structured_picks_json_schema_only_where_forced_tool_choice_is_rejected(monkeypatch):
+    # KB-1028: Sonnet 5.5 는 강제 tool_choice 를 거부한다(profile tool_choice=False) → json_schema.
+    # Haiku 5.5 는 강제 툴 호출을 받으므로 기본(function_calling) 그대로. 네트워크 호출 없음.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-stub")
+    from langchain_anthropic.chat_models import _convert_to_anthropic_output_config_format
+
+    from kbap.content import (
+        DescGen, DescReview, IngredientsGen, IngredientsReview, LongDescGen, NameReview, Translations,
+    )
+    from kbap.namefix import NameFix
+    from kbap.review import init_model, structured
+
+    def method(model):
+        r = structured(init_model(model, 5), NameFix)
+        return r.first.kwargs.get("ls_structured_output_format", {}).get("kwargs", {}).get("method")
+
+    assert method("anthropic:claude-sonnet-5-5") == "json_schema"
+    assert method("anthropic:claude-haiku-5-5") == "function_calling"
+    # 8종 모두 Claude structured output 스키마로 변환된다(ge/le·min_length 는 설명으로 옮겨지고 pydantic 이 검증)
+    for schema in (Translations, DescGen, LongDescGen, IngredientsGen, NameReview, DescReview, IngredientsReview, NameFix):
+        assert _convert_to_anthropic_output_config_format(schema)["schema"]["additionalProperties"] is False

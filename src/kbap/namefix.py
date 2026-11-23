@@ -86,9 +86,9 @@ def normalize_prompt(name: str, feedback: str = "") -> str:
 
 def make_normalizer(model_name: str, timeout: int, callbacks: list) -> Normalizer:
     """실제 LLM 기반 정규화기. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다."""
-    from kbap.review import init_model
+    from kbap.review import init_model, structured
 
-    llm = init_model(model_name, timeout).with_structured_output(NameFix)
+    llm = structured(init_model(model_name, timeout), NameFix)
     # callbacks 가 비면 config 를 넘기지 않는다 — 빈 리스트를 명시하면 그래프 실행이
     # 전파하는 트레이싱 콜백을 덮어써 이 LLM 콜만 트레이스에서 사라진다(content._bind 와 동일 규칙).
     if callbacks:

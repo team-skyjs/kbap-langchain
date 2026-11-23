@@ -224,12 +224,26 @@ def init_model(name: str, timeout: int):
     return init_chat_model(name, timeout=timeout)
 
 
+def structured(llm, schema):
+    """with_structured_output 을 제공자 차이 없이 부른다.
+
+    Claude Sonnet 5.5 처럼 강제 tool_choice 를 거부하는 모델(langchain profile 의 tool_choice=False)은
+    기본 방식(function_calling)에서 강제가 빠져, 모델이 툴을 안 부르면 OutputParserException 이 난다.
+    그런 모델은 Claude 전용 structured output(json_schema)을 쓴다 — ge/le·min_length 같은 미지원 제약은
+    anthropic.transform_schema 가 설명으로 옮기고 pydantic 이 받은 뒤 검증한다.
+    나머지(openai·gemini·Haiku 5.5)는 기존 기본값 그대로다.
+    """
+    if (getattr(llm, "profile", None) or {}).get("tool_choice") is False:
+        return llm.with_structured_output(schema, method="json_schema")
+    return llm.with_structured_output(schema)
+
+
 def make_scorers(config):
     """실제 LLM 기반 채점기."""
     base = init_model(config.model, config.timeout_seconds)
     avoid = init_model(config.avoidance_model, config.timeout_seconds)
-    desc_llm = base.with_structured_output(FieldScore)
-    avoid_llm = avoid.with_structured_output(FieldScore)
+    desc_llm = structured(base, FieldScore)
+    avoid_llm = structured(avoid, FieldScore)
 
     async def description(food: dict) -> FieldScore:
         return await desc_llm.ainvoke(description_prompt(food))

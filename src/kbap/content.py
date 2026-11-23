@@ -587,21 +587,21 @@ def make_fns(
     그래프로 실행하면 ainvoke 의 config 콜백이 전파되므로 비워 둔다 — 둘 다 주면 중복 기록된다.
     """
     from kbap.namefix import clean_one, make_normalizer
-    from kbap.review import init_model
+    from kbap.review import init_model, structured
 
     def _bind(llm):
         return llm.with_config(callbacks=callbacks) if callbacks else llm
 
     base = init_model(model, timeout)
     gen_base = init_model(gen_model, timeout) if gen_model and gen_model != model else base
-    tr_llm = _bind(gen_base.with_structured_output(Translations))
-    desc_llm = _bind(gen_base.with_structured_output(DescGen))
-    long_desc_llm = _bind(gen_base.with_structured_output(LongDescGen))
-    ingredients_llm = _bind(base.with_structured_output(IngredientsGen))
+    tr_llm = _bind(structured(gen_base, Translations))
+    desc_llm = _bind(structured(gen_base, DescGen))
+    long_desc_llm = _bind(structured(gen_base, LongDescGen))
+    ingredients_llm = _bind(structured(base, IngredientsGen))
     # 이름 검수 — 비음식 거름이 콘텐츠 파이프라인의 입구 게이트라 기본 모델을 쓴다.
-    name_review_llm = _bind(base.with_structured_output(NameReview))
-    desc_review_llm = _bind(base.with_structured_output(DescReview))
-    ingredients_review_llm = _bind(base.with_structured_output(IngredientsReview))
+    name_review_llm = _bind(structured(base, NameReview))
+    desc_review_llm = _bind(structured(base, DescReview))
+    ingredients_review_llm = _bind(structured(base, IngredientsReview))
     normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
     async def clean_name(name: str, feedback: str) -> dict:

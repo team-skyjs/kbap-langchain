@@ -121,6 +121,11 @@ Langfuse 키가 `.env`에 있으면 음식 1건 = 트레이스 1개로 자동 �
 
 ## 배포
 
+> **2026-11-25 AWS 계정 파기(KB-1028) 이후 아래 Lambda·ECR 경로는 쓸 수 없다.** 홈서버(docker-compose)에서
+> 같은 이미지로 `python -m kbap.poller` 를 띄워 ElasticMQ 큐(`SQS_ENDPOINT`·`QUEUE_NAME`)를 소비한다.
+> 실패한 메시지도 지우고, 재시도는 서버 outbox 복구가 맡는다. main 푸시 자동 배포(deploy.yml)는 꺼 두었다.
+> 아래는 기록용이다.
+
 `./deploy.sh` — arm64 컨테이너 이미지를 빌드해 ECR `kbap/langchain` 에 `:<git sha>`·`:latest` 로
 푸시하고 Lambda `kbap-generate-content`(dev)·`kbap-generate-content-prod`(prod) 코드를 SHA 태그로
 갱신한다(프로필 `kbap-lambda-deployer`, CI 는 main 푸시 시 자동). 두 함수는 같은 이미지이며
