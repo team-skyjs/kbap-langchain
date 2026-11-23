@@ -13,6 +13,8 @@ dependencies = [
     "langfuse>=3.0",
     "python-dotenv>=1.2.2",
     "langchain-openai>=1.4.1",
+    "langchain-anthropic>=1.7.12",
+    "boto3>=1.44.9",
 ]
 
 [project.scripts]

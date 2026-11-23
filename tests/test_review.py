@@ -601,3 +601,30 @@ async def test_run_batch_missing_food_id_is_held():
 
     assert counts == {"PASS": 0, "FAIL": 0, "HELD": 1}
     assert client.posts == []
+
+
+def test_structured_uses_json_schema_for_claude(monkeypatch):
+    # KB-1028: Claude 는 Haiku·Sonnet 모두 json_schema(강제 툴 호출이면 Haiku 가 thinking 을 건너뛴다).
+    # KBAP_STRUCTURED_METHOD 가 있으면 그 값이 이긴다. 네트워크 호출 없음.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-stub")
+    monkeypatch.delenv("KBAP_STRUCTURED_METHOD", raising=False)
+    from langchain_anthropic.chat_models import _convert_to_anthropic_output_config_format
+
+    from kbap.content import (
+        DescGen, DescReview, IngredientsGen, IngredientsReview, LongDescGen, NameReview, Translations,
+    )
+    from kbap.namefix import NameFix
+    from kbap.review import init_model, structured
+
+    def method(model):
+        r = structured(init_model(model, 5), NameFix)
+        return r.first.kwargs.get("ls_structured_output_format", {}).get("kwargs", {}).get("method")
+
+    assert method("anthropic:claude-sonnet-5-5") == "json_schema"
+    assert method("anthropic:claude-haiku-5-5") == "json_schema"
+    monkeypatch.setenv("KBAP_STRUCTURED_METHOD", "function_calling")
+    assert method("anthropic:claude-haiku-5-5") == "function_calling"
+    monkeypatch.delenv("KBAP_STRUCTURED_METHOD")
+    # 8종 모두 Claude structured output 스키마로 변환된다(ge/le·min_length 는 설명으로 옮겨지고 pydantic 이 검증)
+    for schema in (Translations, DescGen, LongDescGen, IngredientsGen, NameReview, DescReview, IngredientsReview, NameFix):
+        assert _convert_to_anthropic_output_config_format(schema)["schema"]["additionalProperties"] is False

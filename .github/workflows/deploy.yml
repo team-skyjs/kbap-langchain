@@ -2,11 +2,11 @@
 # 수동 실행(workflow_dispatch)은 dev 함수 전용이다 — 기능 브랜치를 prod 에 내보내지 않고 dev 에서 확인할 때(KB-913).
 #   gh workflow run deploy.yml --ref <브랜치> -f target=dev
 # GitHub 은 기본 브랜치(main)의 이 파일에 workflow_dispatch 가 있어야 수동 실행을 허용한다.
+# 2026-11-25 AWS 계정 파기(KB-1028)로 ECR·Lambda 가 없어 main 푸시 자동 배포를 끈다 — 실행은 홈서버 폴러(kbap.poller).
+# 파일은 기록용으로 남긴다. 수동 실행해도 AWS 자격이 없어 실패한다.
 name: deploy
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       target:
