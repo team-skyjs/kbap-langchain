@@ -233,7 +233,10 @@ def structured(llm, schema):
     anthropic.transform_schema 가 설명으로 옮기고 pydantic 이 받은 뒤 검증한다.
     나머지(openai·gemini·Haiku 5.5)는 기존 기본값 그대로다.
     """
-    if (getattr(llm, "profile", None) or {}).get("tool_choice") is False:
+    # KBAP_STRUCTURED_METHOD=json_schema 는 비교용 강제 — Haiku 5.5 는 강제 툴 호출이면 thinking 을 건너뛴다.
+    if os.environ.get("KBAP_STRUCTURED_METHOD") == "json_schema" or (
+        (getattr(llm, "profile", None) or {}).get("tool_choice") is False
+    ):
         return llm.with_structured_output(schema, method="json_schema")
     return llm.with_structured_output(schema)
 

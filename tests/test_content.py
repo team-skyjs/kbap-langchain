@@ -806,3 +806,58 @@ def test_zero_sugar_drinks_keep_alcohol(source, alcohol):
     ing = {"substances": [], "spiciness": 0}
     got = with_alcohol(source, ing, source)["substances"]
     assert got == ([{"code": "ALCOHOL", "inclusionPercent": 100}] if alcohol else [])
+
+
+def test_llm_models_env_overrides_config(monkeypatch):
+    # KB-1028 비교용: KBAP_<키> 환경변수가 config.yaml 값을 이기고, 없으면 config 값 그대로
+    from kbap.content import llm_models
+
+    monkeypatch.setenv("KBAP_INGREDIENTS_MODEL", "anthropic:claude-sonnet-5-5")
+    monkeypatch.delenv("KBAP_MODEL", raising=False)
+    got = llm_models({"model": "anthropic:claude-haiku-5-5", "namefix_model": "x"})
+    assert got["model"] == "anthropic:claude-haiku-5-5"
+    assert got["ingredients_model"] == "anthropic:claude-sonnet-5-5"
+    assert got["namefix_model"] == "x" and got["review_model"] is None
+
+
+def test_make_fns_routes_per_node_models(monkeypatch):
+    # 기피성분 생성·검수는 ingredients_model, 이름·설명 검수는 review_model, 기피성분 검수는 review_model 이 이긴다
+    import kbap.review
+    from kbap import content
+
+    bound = []
+
+    class Stub:
+        def __init__(self, name):
+            self.name = name
+
+        def with_structured_output(self, schema, **kw):
+            bound.append((schema.__name__, self.name))
+            return self
+
+    monkeypatch.setattr(kbap.review, "init_model", lambda name, timeout: Stub(name))
+    content.make_fns("base", 5, ingredients_model="ing")
+    assert dict(bound) == {"Translations": "base", "DescGen": "base", "LongDescGen": "base",
+                           "IngredientsGen": "ing", "NameReview": "base", "DescReview": "base",
+                           "IngredientsReview": "ing", "NameFix": "base"}
+    bound.clear()
+    content.make_fns("base", 5, ingredients_model="ing", review_model="rev")
+    assert dict(bound)["IngredientsGen"] == "ing" and dict(bound)["IngredientsReview"] == "rev"
+    assert dict(bound)["NameReview"] == "rev"
+
+
+async def test_sample_run_never_posts_and_reports_errors(capsys):
+    from kbap.content import JudgeVerdict
+    from kbap.sample import run
+
+    class Graph:
+        async def ainvoke(self, inp, config):
+            if inp["food_name"] == "boom":
+                raise RuntimeError("x")
+            return {"verdict": JudgeVerdict(reason="r", passed=False, failure_kind="NOT_FOOD"), "cleaned_name": "c"}
+
+    rows = await run(["a", "boom"], Graph(), 2, [])
+    by = {r["name"]: r for r in rows}
+    assert by["a"]["failure_kind"] == "NOT_FOOD" and by["a"]["ingredients"] is None
+    assert "error" in by["boom"]
+    assert len(capsys.readouterr().out.strip().splitlines()) == 2

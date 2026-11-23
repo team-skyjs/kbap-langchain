@@ -20,6 +20,7 @@ rejectionReason 은 선택 — 운영자가 반려하며 쓴 사유(재수집 �
 from collections.abc import Awaitable, Callable
 from typing import Annotated, NamedTuple, TypedDict
 import asyncio
+import functools
 import json
 import logging
 import operator
@@ -576,6 +577,8 @@ def make_fns(
     gen_model: str | None = None,
     namefix_model: str | None = None,
     callbacks: list = [],
+    ingredients_model: str | None = None,
+    review_model: str | None = None,
 ):
     """실제 LLM 기반 노드 모음. 테스트가 LLM 패키지 없이 실행되도록 함수 안에서 가져온다.
 
@@ -592,16 +595,20 @@ def make_fns(
     def _bind(llm):
         return llm.with_config(callbacks=callbacks) if callbacks else llm
 
-    base = init_model(model, timeout)
-    gen_base = init_model(gen_model, timeout) if gen_model and gen_model != model else base
+    # 같은 이름은 한 인스턴스 — 노드별 모델(KB-1028 비교용)을 안 쓰면 전부 base 하나다.
+    m = functools.cache(lambda name: init_model(name, timeout))
+    base = m(model)
+    gen_base = m(gen_model or model)
+    ing_base = m(ingredients_model or model)  # 기피성분 생성·검수
+    rev_base = m(review_model or model)  # 검수 3곳 — 기피성분 검수는 review_model > ingredients_model > model
     tr_llm = _bind(structured(gen_base, Translations))
     desc_llm = _bind(structured(gen_base, DescGen))
     long_desc_llm = _bind(structured(gen_base, LongDescGen))
-    ingredients_llm = _bind(structured(base, IngredientsGen))
+    ingredients_llm = _bind(structured(ing_base, IngredientsGen))
     # 이름 검수 — 비음식 거름이 콘텐츠 파이프라인의 입구 게이트라 기본 모델을 쓴다.
-    name_review_llm = _bind(structured(base, NameReview))
-    desc_review_llm = _bind(structured(base, DescReview))
-    ingredients_review_llm = _bind(structured(base, IngredientsReview))
+    name_review_llm = _bind(structured(rev_base, NameReview))
+    desc_review_llm = _bind(structured(rev_base, DescReview))
+    ingredients_review_llm = _bind(structured(m(review_model or ingredients_model or model), IngredientsReview))
     normalize = make_normalizer(namefix_model or model, timeout, callbacks=callbacks)
 
     async def clean_name(name: str, feedback: str) -> dict:
@@ -670,14 +677,20 @@ def load_graph(config_path: str | None = None):
     load_dotenv()
     with open(config_path or os.environ.get("CONFIG_PATH", "config.yaml")) as f:
         raw = yaml.safe_load(f)
-    llm = raw["llm"]
-    fns = make_fns(
-        llm["model"],
-        llm.get("timeout_seconds", 120),
-        gen_model=llm.get("gen_model"),
-        namefix_model=llm.get("namefix_model"),
-    )
+    models = llm_models(raw["llm"])
+    fns = make_fns(models.pop("model"), raw["llm"].get("timeout_seconds", 120), **models)
     return build_content_graph(apply_review_engine(fns, raw))
+
+
+MODEL_KEYS = ("model", "gen_model", "namefix_model", "ingredients_model", "review_model")
+
+
+def llm_models(llm: dict) -> dict:
+    """노드별 모델 — 환경변수 KBAP_<키>(예: KBAP_MODEL, KBAP_INGREDIENTS_MODEL)가 config.yaml 을 이긴다.
+
+    config.yaml 기본값을 건드리지 않고 홈서버에서 모델을 바꿔 비교하려고 둔다(KB-1028).
+    """
+    return {k: os.environ.get(f"KBAP_{k.upper()}") or llm.get(k) for k in MODEL_KEYS}
 
 
 REVIEW_NODES = ("name", "description", "ingredients")
